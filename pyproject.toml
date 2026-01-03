@@ -43,6 +43,9 @@ target-version = "py311"
 select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
 ignore = ["E501"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["config", "devices", "tools"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

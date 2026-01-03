@@ -155,12 +155,13 @@ async def websocket_endpoint(websocket: WebSocket):
         async with ClaudeSDKClient(options=options) as client:
             log.info("Claude Agent SDK initialized")
 
-            # Build dynamic welcome message with TV state
+            # Build dynamic welcome message - show default selected TV
             config = get_config()
             if config.tv_devices:
-                tv_names = [f"{tv.name}" for tv in config.tv_devices.values()]
-                tv_list = " and ".join(tv_names) if len(tv_names) <= 2 else ", ".join(tv_names)
-                welcome = f"Ready to control {tv_list}. What would you like to do?"
+                # Get the first/default TV
+                default_device_id = next(iter(config.tv_devices.keys()))
+                default_tv = config.tv_devices[default_device_id]
+                welcome = f"{default_tv.name} selected. What would you like to watch?"
             else:
                 welcome = "No TVs configured. Add TV_DEVICES to your .env file."
 
@@ -438,9 +439,15 @@ async def remote_list_apps(device: str) -> dict[str, Any]:
             "name": "Prime",
             "logo": "https://cdn.simpleicons.org/primevideo/00A8E1",
         },
-        # Hulu (no simpleicons, use fallback)
-        "com.hulu.plus": {"name": "Hulu", "logo": None, "color": "#1CE783"},
-        "com.hulu.livingroomplus": {"name": "Hulu", "logo": None, "color": "#1CE783"},
+        # Hulu
+        "com.hulu.plus": {
+            "name": "Hulu",
+            "logo": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect fill='%231CE783' width='24' height='24' rx='4'/%3E%3Ctext x='12' y='17' text-anchor='middle' fill='%23000' font-family='Arial,sans-serif' font-weight='bold' font-size='12'%3Ehulu%3C/text%3E%3C/svg%3E",
+        },
+        "com.hulu.livingroomplus": {
+            "name": "Hulu",
+            "logo": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect fill='%231CE783' width='24' height='24' rx='4'/%3E%3Ctext x='12' y='17' text-anchor='middle' fill='%23000' font-family='Arial,sans-serif' font-weight='bold' font-size='12'%3Ehulu%3C/text%3E%3C/svg%3E",
+        },
         # Apple TV
         "com.apple.atve.amazon.appletv": {
             "name": "Apple TV",
@@ -453,9 +460,15 @@ async def remote_list_apps(device: str) -> dict[str, Any]:
         # HBO Max
         "com.hbo.hbonow": {"name": "Max", "logo": "https://cdn.simpleicons.org/hbo/ffffff"},
         "com.wbd.stream": {"name": "Max", "logo": "https://cdn.simpleicons.org/hbo/ffffff"},
-        # Peacock (no simpleicons, use fallback)
-        "com.peacocktv.peacockandroid": {"name": "Peacock", "logo": None, "color": "#000000"},
-        "com.peacock.peacockfiretv": {"name": "Peacock", "logo": None, "color": "#000000"},
+        # Peacock
+        "com.peacocktv.peacockandroid": {
+            "name": "Peacock",
+            "logo": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect fill='%23000' width='24' height='24' rx='4'/%3E%3Ctext x='12' y='16' text-anchor='middle' fill='%23fff' font-family='Arial,sans-serif' font-weight='bold' font-size='7'%3EPEACOCK%3C/text%3E%3C/svg%3E",
+        },
+        "com.peacock.peacockfiretv": {
+            "name": "Peacock",
+            "logo": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect fill='%23000' width='24' height='24' rx='4'/%3E%3Ctext x='12' y='16' text-anchor='middle' fill='%23fff' font-family='Arial,sans-serif' font-weight='bold' font-size='7'%3EPEACOCK%3C/text%3E%3C/svg%3E",
+        },
         # Paramount+
         "com.cbs.ott": {
             "name": "Paramount+",
@@ -487,15 +500,18 @@ async def remote_list_apps(device: str) -> dict[str, Any]:
         # ESPN
         "com.espn.score_center": {
             "name": "ESPN",
-            "logo": "https://cdn.simpleicons.org/espn/FF0033",
+            "logo": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect fill='%23D00' width='24' height='24' rx='4'/%3E%3Ctext x='12' y='16' text-anchor='middle' fill='%23fff' font-family='Arial,sans-serif' font-weight='bold' font-size='8'%3EESPN%3C/text%3E%3C/svg%3E",
         },
         # Fox Sports
         "com.foxsports.videogo": {
             "name": "Fox Sports",
             "logo": "https://cdn.simpleicons.org/fox/ffffff",
         },
-        # DirecTV / AT&T TV (no simpleicons, use fallback)
-        "com.att.tv": {"name": "DirecTV", "logo": None, "color": "#00A8E1"},
+        # DirecTV / AT&T TV
+        "com.att.tv": {
+            "name": "DirecTV",
+            "logo": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect fill='%2300A8E1' width='24' height='24' rx='4'/%3E%3Ctext x='12' y='15' text-anchor='middle' fill='%23fff' font-family='Arial,sans-serif' font-weight='bold' font-size='5'%3EDIRECTV%3C/text%3E%3C/svg%3E",
+        },
         # Sling TV
         "com.sling": {"name": "Sling", "logo": "https://cdn.simpleicons.org/sling/0095D5"},
         # Vudu / Fandango

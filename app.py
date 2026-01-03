@@ -155,13 +155,11 @@ async def websocket_endpoint(websocket: WebSocket):
         async with ClaudeSDKClient(options=options) as client:
             log.info("Claude Agent SDK initialized")
 
-            # Build dynamic welcome message - show default selected TV
+            # Build dynamic welcome message with TV status
             config = get_config()
             if config.tv_devices:
-                # Get the first/default TV
                 default_device_id = next(iter(config.tv_devices.keys()))
-                default_tv = config.tv_devices[default_device_id]
-                welcome = f"{default_tv.name} selected. What would you like to watch?"
+                welcome = _get_tv_status_message(default_device_id)
             else:
                 welcome = "No TVs configured. Add TV_DEVICES to your .env file."
 
@@ -342,6 +340,75 @@ def _adb(device: str, *args: str) -> tuple[str, str, int]:
     cmd = ["adb", "-s", addr, *args]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     return result.stdout, result.stderr, result.returncode
+
+
+# Package name to friendly app name mapping
+APP_NAMES = {
+    "com.netflix.ninja": "Netflix",
+    "com.netflix.mediaclient": "Netflix",
+    "com.google.android.youtube.tv": "YouTube",
+    "com.amazon.firetv.youtube": "YouTube",
+    "com.disney.disneyplus": "Disney+",
+    "com.amazon.avod": "Prime Video",
+    "com.hulu.plus": "Hulu",
+    "com.hulu.livingroomplus": "Hulu",
+    "com.apple.atve.amazon.appletv": "Apple TV",
+    "com.apple.atve.androidtv.appletv": "Apple TV",
+    "com.hbo.hbonow": "Max",
+    "com.wbd.stream": "Max",
+    "com.peacocktv.peacockandroid": "Peacock",
+    "com.peacock.peacockfiretv": "Peacock",
+    "com.cbs.ott": "Paramount+",
+    "com.spotify.tv.android": "Spotify",
+    "com.plexapp.android": "Plex",
+    "tv.twitch.android.app": "Twitch",
+    "com.amazon.tv.launcher": "Home",
+    "com.google.android.tvlauncher": "Home",
+    "com.amazon.firetv.settings": "Settings",
+}
+
+
+def _get_tv_status_message(device_id: str) -> str:
+    """Get a human-readable TV status message."""
+    config = get_config()
+    tv = config.tv_devices.get(device_id)
+    if not tv:
+        return "No TV configured."
+
+    try:
+        # Quick status check via ADB
+        cmd = (
+            "dumpsys power | grep mWakefulness; "
+            "dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp'"
+        )
+        stdout, _, code = _adb(device_id, "shell", cmd)
+
+        if code != 0:
+            return f"{tv.name} is offline."
+
+        screen_on = False
+        current_app = None
+
+        for line in stdout.split("\n"):
+            line = line.strip()
+            if "mWakefulness=" in line:
+                screen_on = "Awake" in line
+            elif "mCurrentFocus" in line or "mFocusedApp" in line:
+                for part in line.split():
+                    if "/" in part and "." in part:
+                        pkg = part.strip("{})/").split("/")[0]
+                        current_app = APP_NAMES.get(pkg, pkg.split(".")[-1].title())
+                        break
+
+        if not screen_on:
+            return f"{tv.name} is off."
+        elif current_app:
+            return f"{tv.name} is on {current_app}."
+        else:
+            return f"{tv.name} is on."
+
+    except Exception:
+        return f"{tv.name} selected."
 
 
 @app.post("/api/remote/navigate")

@@ -33,5 +33,3 @@ venv/
 # OS
 .DS_Store
 
-# Project
-config.py

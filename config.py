@@ -34,7 +34,14 @@ class Config(BaseSettings):
     # TP-Link Tapo credentials
     tapo_username: str = ""
     tapo_password: str = ""
-    tapo_bulb_ips: list[str] = Field(default_factory=list)
+    tapo_bulb_ips_raw: str = Field(default="", alias="TAPO_BULB_IPS")
+
+    @property
+    def tapo_bulb_ips(self) -> list[str]:
+        """Parse TAPO_BULB_IPS from comma-separated string."""
+        if not self.tapo_bulb_ips_raw:
+            return []
+        return [ip.strip() for ip in self.tapo_bulb_ips_raw.split(",") if ip.strip()]
 
     # Tuya devices - JSON string parsed to dict
     tuya_devices: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -54,14 +61,6 @@ class Config(BaseSettings):
                 return json.loads(v) if v else {}
             except json.JSONDecodeError:
                 return {}
-        return v
-
-    @field_validator("tapo_bulb_ips", mode="before")
-    @classmethod
-    def parse_bulb_ips(cls, v: str | list) -> list:
-        """Parse TAPO_BULB_IPS from comma-separated string."""
-        if isinstance(v, str):
-            return [ip.strip() for ip in v.split(",") if ip.strip()]
         return v
 
     @field_validator("tuya_devices", mode="before")

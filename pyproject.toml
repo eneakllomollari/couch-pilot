@@ -21,6 +21,7 @@ dependencies = [
     "pyatv>=0.16.1",
     "claude-agent-sdk>=0.1.18",
     "anthropic>=0.75.0",
+    "structlog>=24.1.0",
 ]
 
 [project.scripts]
@@ -32,6 +33,7 @@ dev = [
     "ty>=0.0.1a6",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
     "pre-commit>=4.5.1",
 ]
 
@@ -44,7 +46,7 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["config", "devices", "tools"]
+known-first-party = ["config", "devices", "logging_config", "tools"]
 
 [tool.ruff.format]
 quote-style = "double"

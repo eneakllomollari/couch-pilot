@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TV Control</title>
+    <meta name="description" content="AI-powered TV control via natural language chat">
+    <meta name="theme-color" content="#0d0d0f">
+    <title>Couch Pilot</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect x='10' y='45' width='80' height='35' rx='8' fill='%233b82f6'/><rect x='5' y='55' width='15' height='25' rx='4' fill='%232563eb'/><rect x='80' y='55' width='15' height='25' rx='4' fill='%232563eb'/><rect x='20' y='35' width='60' height='20' rx='6' fill='%2360a5fa'/><circle cx='75' cy='30' r='8' fill='%2322c55e'/></svg>">
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
@@ -103,6 +106,18 @@
 
         <!-- Chat Panel -->
         <div class="chat-panel" role="region" aria-label="Chat interface">
+            <header class="chat-header">
+                <div class="brand">
+                    <svg class="brand-icon" viewBox="0 0 100 100" aria-hidden="true">
+                        <rect x="10" y="45" width="80" height="35" rx="8" fill="var(--accent)"/>
+                        <rect x="5" y="55" width="15" height="25" rx="4" fill="#2563eb"/>
+                        <rect x="80" y="55" width="15" height="25" rx="4" fill="#2563eb"/>
+                        <rect x="20" y="35" width="60" height="20" rx="6" fill="#60a5fa"/>
+                        <circle cx="75" cy="30" r="8" fill="var(--success)"/>
+                    </svg>
+                    <span class="brand-name">Couch Pilot</span>
+                </div>
+            </header>
             <div class="chat-messages" id="messages" role="log" aria-live="polite" aria-label="Chat messages">
             </div>
 

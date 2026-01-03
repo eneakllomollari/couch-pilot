@@ -100,6 +100,11 @@ IMPORTANT:
 Tools: play, get_tv_status, screenshot, navigate (up/down/left/right/select/back/home),
        play_pause, turn_on, turn_off, volume, type_text, list_apps, WebSearch, Read, Bash
 
+DEVICE SELECTION:
+- User messages are prefixed with [Target device: X] indicating which TV to control
+- ALWAYS use the device specified in the prefix unless user explicitly mentions another device
+- Example: "[Target device: google_tv] play Netflix" → use google_tv
+
 DO NOT report success without calling get_tv_status first!"""
 
 
@@ -149,32 +154,40 @@ async def websocket_endpoint(websocket: WebSocket):
         log.info("NEW SESSION - Client connected")
         async with ClaudeSDKClient(options=options) as client:
             log.info("Claude Agent SDK initialized")
-            # Send welcome
-            await websocket.send_json(
-                {
-                    "type": "assistant",
-                    "content": "Hi! I can control your Fire TV and TCL Google TV. What would you like to do?",
-                }
-            )
+
+            # Build dynamic welcome message with TV state
+            config = get_config()
+            if config.tv_devices:
+                tv_names = [f"{tv.name}" for tv in config.tv_devices.values()]
+                tv_list = " and ".join(tv_names) if len(tv_names) <= 2 else ", ".join(tv_names)
+                welcome = f"Ready to control {tv_list}. What would you like to do?"
+            else:
+                welcome = "No TVs configured. Add TV_DEVICES to your .env file."
+
+            await websocket.send_json({"type": "assistant", "content": welcome})
 
             while True:
                 data = await websocket.receive_text()
                 msg = json.loads(data)
                 user_text = msg.get("content", "").strip()
+                selected_device = msg.get("device", "fire_tv")
 
                 if not user_text:
                     continue
 
+                # Prepend device context so agent uses the selected TV by default
+                query_text = f"[Target device: {selected_device}] {user_text}"
+
                 log.info(f"{'=' * 60}")
-                log.info(f"USER: {user_text}")
+                log.info(f"USER ({selected_device}): {user_text}")
                 log.info(f"{'=' * 60}")
                 await websocket.send_json({"type": "typing", "content": True})
 
                 try:
                     start_time = time.time()
 
-                    # Query Claude
-                    await client.query(user_text)
+                    # Query Claude with device context
+                    await client.query(query_text)
 
                     # Collect response
                     response_text = ""
@@ -494,7 +507,12 @@ async def remote_list_apps(device: str) -> dict[str, Any]:
         },
     }
 
-    stdout, stderr, rc = _adb(device, "shell", "pm", "list", "packages")
+    try:
+        stdout, stderr, rc = _adb(device, "shell", "pm", "list", "packages")
+    except ValueError:
+        # Device not configured
+        return {"apps": [], "configured": False}
+
     if rc != 0:
         return {"apps": [], "error": stderr}
 

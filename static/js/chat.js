@@ -106,7 +106,9 @@ class RemoteChatApp {
             const response = await fetch(`/api/remote/apps/${this.selectedDevice}`);
             const data = await response.json();
 
-            if (data.apps && data.apps.length > 0) {
+            if (data.configured === false) {
+                grid.innerHTML = '<div class="apps-empty">Configure TV in .env</div>';
+            } else if (data.apps && data.apps.length > 0) {
                 grid.innerHTML = data.apps.map(app => {
                     const icon = app.logo
                         ? `<img class="app-logo" src="${app.logo}" alt="${app.name}">`
@@ -247,7 +249,7 @@ class RemoteChatApp {
         }
 
         this.addMessage('user', message);
-        this.ws.send(JSON.stringify({ content: message }));
+        this.ws.send(JSON.stringify({ content: message, device: this.selectedDevice }));
         this.messageInput.value = '';
         this.setProcessing(true);
     }
@@ -268,15 +270,18 @@ class RemoteChatApp {
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${type}`;
 
-        const avatar = document.createElement('div');
-        avatar.className = 'message-avatar';
-        avatar.textContent = type === 'user' ? 'You' : 'AI';
-
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
         contentDiv.textContent = content;
 
-        messageDiv.appendChild(avatar);
+        // Only show avatar for user messages
+        if (type === 'user') {
+            const avatar = document.createElement('div');
+            avatar.className = 'message-avatar';
+            avatar.textContent = 'You';
+            messageDiv.appendChild(avatar);
+        }
+
         messageDiv.appendChild(contentDiv);
 
         this.messagesContainer.appendChild(messageDiv);

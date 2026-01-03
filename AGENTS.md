@@ -1,6 +1,6 @@
-# Smart Home - Developer Guide
+# Couch Pilot - Developer Guide
 
-Chat-based TV control using Claude Agent SDK + smart bulb control.
+AI-powered TV control using Claude Agent SDK + smart bulb control.
 
 ## Stack
 

@@ -1,6 +1,6 @@
-# Smart Home TV Control
+# Couch Pilot
 
-A FastAPI-based chatbot for controlling Fire TV and Google TV devices via natural language. Uses Claude AI with ADB for TV automation.
+AI-powered TV control via natural language chat. Control your Fire TV and Google TV devices by simply telling them what to do.
 
 > **Security Note**: This application is designed for local network use only. Do not expose to the public internet.
 
@@ -24,8 +24,8 @@ A FastAPI-based chatbot for controlling Fire TV and Google TV devices via natura
 
 1. **Clone and install**:
    ```bash
-   git clone https://github.com/yourusername/smart-home.git
-   cd smart-home
+   git clone https://github.com/eneakllomollari/couch-pilot.git
+   cd couch-pilot
    uv sync
    ```
 

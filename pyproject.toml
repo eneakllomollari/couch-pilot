@@ -1,7 +1,7 @@
 [project]
-name = "smart-home"
+name = "couch-pilot"
 version = "0.1.0"
-description = "Smart Home Dashboard - Control your IoT devices"
+description = "AI-powered TV control via natural language chat"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

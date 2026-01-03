@@ -382,12 +382,13 @@ def _get_tv_status_message(device_id: str) -> str:
         return "No TV configured."
 
     try:
-        # Quick status check via ADB (use || true to ignore grep exit codes)
+        # Get power state, current app, and media info
         cmd = (
             "dumpsys power | grep mWakefulness || true; "
-            "dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' || true"
+            "dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' || true; "
+            "dumpsys media_session | grep -E 'state=PlaybackState|metadata:' || true"
         )
-        stdout, _, code = _adb(device_id, "shell", cmd)
+        stdout, _, _ = _adb(device_id, "shell", cmd)
 
         # Check if we got any output (ADB connected)
         if not stdout.strip():
@@ -395,6 +396,8 @@ def _get_tv_status_message(device_id: str) -> str:
 
         screen_on = False
         current_app = None
+        playback_state = None  # None, "playing", "paused"
+        media_title = None
 
         for line in stdout.split("\n"):
             line = line.strip()
@@ -406,11 +409,33 @@ def _get_tv_status_message(device_id: str) -> str:
                         pkg = part.strip("{})/").split("/")[0]
                         current_app = APP_NAMES.get(pkg, pkg.split(".")[-1].title())
                         break
+            elif "state=PlaybackState" in line:
+                if "state=3" in line:  # Playing
+                    playback_state = "playing"
+                elif "state=2" in line:  # Paused
+                    playback_state = "paused"
+            elif "metadata:" in line and "description=" in line:
+                # Extract title from metadata: size=X, description=Title, Subtitle, ...
+                try:
+                    desc_part = line.split("description=")[1]
+                    title = desc_part.split(",")[0].strip()
+                    if title and title.lower() != "null":
+                        media_title = title
+                except (IndexError, AttributeError):
+                    pass
 
         if not screen_on:
             return f"{tv.name} is off."
-        elif current_app:
-            return f"{tv.name} is on {current_app}."
+
+        # Build status message
+        if playback_state == "playing" and media_title:
+            return f"{tv.name}: Playing {media_title}"
+        elif playback_state == "paused" and media_title:
+            return f"{tv.name}: {media_title} (paused)"
+        elif playback_state == "playing" and current_app:
+            return f"{tv.name}: Playing on {current_app}"
+        elif current_app and current_app != "Home":
+            return f"{tv.name}: {current_app}"
         else:
             return f"{tv.name} is on."
 

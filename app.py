@@ -315,6 +315,12 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/api/remote/status/{device}")
+async def remote_status(device: str) -> dict[str, Any]:
+    """Get TV status message for display."""
+    return {"status": _get_tv_status_message(device)}
+
+
 # =============================================================================
 # Direct Remote API - Fast, no AI
 # =============================================================================

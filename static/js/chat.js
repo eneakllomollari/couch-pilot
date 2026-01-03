@@ -92,10 +92,28 @@ class RemoteChatApp {
                 btn.classList.add('active');
                 this.selectedDevice = btn.dataset.device;
                 this.loadApps();
+                this.loadTVStatus();
             });
         });
         // Load apps for default device
         this.loadApps();
+    }
+
+    async loadTVStatus() {
+        // Don't fetch status while processing a message
+        if (this.isProcessing) return;
+
+        try {
+            const response = await fetch(`/api/remote/status/${this.selectedDevice}`);
+            const data = await response.json();
+            if (data.status) {
+                // Clear existing messages and show new status
+                this.messagesContainer.innerHTML = '';
+                this.addMessage('assistant', data.status);
+            }
+        } catch (err) {
+            console.error('Failed to load TV status:', err);
+        }
     }
 
     async loadApps() {

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run ruff linter
+        run: uv run ruff check .
+
+      - name: Check ruff formatting
+        run: uv run ruff format --check .
+
+      - name: Run ty type checker
+        run: uv run ty check
+
+      - name: Run tests
+        env:
+          TV_DEVICES: '{}'
+          TAPO_USERNAME: ''
+          TAPO_PASSWORD: ''
+          TAPO_BULB_IPS: ''
+        run: uv run pytest -v

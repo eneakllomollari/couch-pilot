@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TV Control</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Remote Control -->
+        <div class="remote-wrapper">
+            <div class="remote-body">
+                <div class="tv-selector" role="tablist" aria-label="TV device selection">
+                    <button class="tv-btn active" data-device="fire_tv" role="tab" aria-selected="true">Fire TV</button>
+                    <button class="tv-btn" data-device="google_tv" role="tab" aria-selected="false">Google TV</button>
+                </div>
+
+                <div class="remote-section">
+                    <button class="power-btn" data-action="power" title="Power" aria-label="Toggle power">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                            <path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/>
+                        </svg>
+                    </button>
+                </div>
+
+                <div class="remote-section">
+                    <div class="dpad" role="group" aria-label="Navigation controls">
+                        <button class="dpad-btn up" data-action="up" aria-label="Navigate up">
+                            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 8l-6 6h12z"/></svg>
+                        </button>
+                        <button class="dpad-btn left" data-action="left" aria-label="Navigate left">
+                            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 12l6-6v12z"/></svg>
+                        </button>
+                        <button class="dpad-btn ok" data-action="select" aria-label="Select">OK</button>
+                        <button class="dpad-btn right" data-action="right" aria-label="Navigate right">
+                            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 12l-6 6V6z"/></svg>
+                        </button>
+                        <button class="dpad-btn down" data-action="down" aria-label="Navigate down">
+                            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 16l6-6H6z"/></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="remote-section">
+                    <div class="btn-row" role="group" aria-label="Playback controls">
+                        <button class="ctrl-btn" data-action="back" title="Back" aria-label="Go back">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <path d="M19 12H5M12 19l-7-7 7-7"/>
+                            </svg>
+                        </button>
+                        <button class="ctrl-btn primary round" data-action="play_pause" title="Play/Pause" aria-label="Play or pause">
+                            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                <path d="M8 5v14l11-7z"/>
+                            </svg>
+                        </button>
+                        <button class="ctrl-btn" data-action="home" title="Home" aria-label="Go to home screen">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="remote-section">
+                    <div class="btn-row" role="group" aria-label="Volume controls">
+                        <button class="ctrl-btn" data-action="vol_down" title="Volume Down" aria-label="Decrease volume">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/>
+                                <line x1="23" y1="12" x2="17" y2="12"/>
+                            </svg>
+                        </button>
+                        <button class="ctrl-btn" data-action="mute" title="Mute" aria-label="Mute volume">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/>
+                                <line x1="23" y1="9" x2="17" y2="15"/>
+                                <line x1="17" y1="9" x2="23" y2="15"/>
+                            </svg>
+                        </button>
+                        <button class="ctrl-btn" data-action="vol_up" title="Volume Up" aria-label="Increase volume">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/>
+                                <line x1="20" y1="9" x2="20" y2="15"/>
+                                <line x1="17" y1="12" x2="23" y2="12"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="apps-section">
+                    <div class="apps-label">Apps</div>
+                    <div class="apps-grid" id="apps-grid">
+                        <div class="apps-loading">Loading...</div>
+                    </div>
+                </div>
+
+                <div class="status-bar">
+                    <span class="status-dot" id="status-dot"></span>
+                    <span id="status">Connecting...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat Panel -->
+        <div class="chat-panel" role="region" aria-label="Chat interface">
+            <div class="chat-messages" id="messages" role="log" aria-live="polite" aria-label="Chat messages">
+            </div>
+
+            <div class="chat-input-area">
+                <div class="typing-indicator" id="typing" style="display: none;" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                </div>
+                <form id="chat-form" class="chat-form">
+                    <label for="message-input" class="visually-hidden">Chat message</label>
+                    <input
+                        type="text"
+                        id="message-input"
+                        placeholder="Play Peppa Pig, open Netflix..."
+                        autocomplete="off"
+                        aria-label="Type a command for your TV"
+                    >
+                    <button type="submit" aria-label="Send message">
+                        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                        </svg>
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/chat.js"></script>
+</body>
+</html>

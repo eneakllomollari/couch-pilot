@@ -10,11 +10,17 @@ from urllib.parse import urlparse
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-# TV device configurations
-TV_DEVICES = {
-    "fire_tv": {"ip": "192.168.1.10", "port": 5555, "name": "Fire TV"},
-    "google_tv": {"ip": "192.168.1.108", "port": 5555, "name": "TCL Google TV"},
-}
+from config import get_config
+
+
+def _get_tv_devices() -> dict[str, dict[str, Any]]:
+    """Get TV devices from configuration."""
+    config = get_config()
+    return {
+        device_id: {"ip": tv.ip, "port": tv.port, "name": tv.name}
+        for device_id, tv in config.tv_devices.items()
+    }
+
 
 # Cache for discovered packages per device
 _package_cache: dict[str, dict[str, str]] = {}
@@ -22,7 +28,8 @@ _package_cache: dict[str, dict[str, str]] = {}
 
 def _get_package(device: str, app: str) -> str | None:
     """Get package name for an app on a device by querying it."""
-    addr = f"{TV_DEVICES[device]['ip']}:{TV_DEVICES[device]['port']}"
+    tv_devices = _get_tv_devices()
+    addr = f"{tv_devices[device]['ip']}:{tv_devices[device]['port']}"
 
     # Check cache first
     if device in _package_cache and app in _package_cache[device]:
@@ -65,9 +72,10 @@ def _get_package(device: str, app: str) -> str | None:
 
 def _get_device_address(device: str) -> str:
     """Get device IP:port string."""
-    if device not in TV_DEVICES:
-        raise ValueError(f"Unknown device: {device}. Available: {list(TV_DEVICES.keys())}")
-    d = TV_DEVICES[device]
+    tv_devices = _get_tv_devices()
+    if device not in tv_devices:
+        raise ValueError(f"Unknown device: {device}. Available: {list(tv_devices.keys())}")
+    d = tv_devices[device]
     return f"{d['ip']}:{d['port']}"
 
 
@@ -521,7 +529,7 @@ async def navigate(args: dict[str, Any]) -> dict[str, Any]:
 
     result = {
         "action": action,
-        "device": TV_DEVICES[device]["name"],
+        "device": _get_tv_devices()[device]["name"],
         "focus_changed": focus_changed,
         "current_state": status,
     }
@@ -568,7 +576,7 @@ async def play_pause(args: dict[str, Any]) -> dict[str, Any]:
             "content": [
                 {
                     "type": "text",
-                    "text": f"Play/pause toggled on {TV_DEVICES[device]['name']}: {before_name} → {after_name} (verified)",
+                    "text": f"Play/pause toggled on {_get_tv_devices()[device]['name']}: {before_name} → {after_name} (verified)",
                 }
             ]
         }
@@ -577,7 +585,7 @@ async def play_pause(args: dict[str, Any]) -> dict[str, Any]:
             "content": [
                 {
                     "type": "text",
-                    "text": f"Play/pause sent to {TV_DEVICES[device]['name']} but no active media session detected. Command may have had no effect.",
+                    "text": f"Play/pause sent to {_get_tv_devices()[device]['name']} but no active media session detected. Command may have had no effect.",
                 }
             ],
             "is_error": True,
@@ -587,7 +595,7 @@ async def play_pause(args: dict[str, Any]) -> dict[str, Any]:
             "content": [
                 {
                     "type": "text",
-                    "text": f"Play/pause sent to {TV_DEVICES[device]['name']} but state did not change (still {after_name}). App may not have responded.",
+                    "text": f"Play/pause sent to {_get_tv_devices()[device]['name']} but state did not change (still {after_name}). App may not have responded.",
                 }
             ],
             "is_error": True,
@@ -622,7 +630,7 @@ async def turn_on(args: dict[str, Any]) -> dict[str, Any]:
                     "content": [
                         {
                             "type": "text",
-                            "text": f"{TV_DEVICES[device]['name']} was already on (verified: screen is awake)",
+                            "text": f"{_get_tv_devices()[device]['name']} was already on (verified: screen is awake)",
                         }
                     ]
                 }
@@ -630,7 +638,7 @@ async def turn_on(args: dict[str, Any]) -> dict[str, Any]:
                 "content": [
                     {
                         "type": "text",
-                        "text": f"{TV_DEVICES[device]['name']} turned on successfully (verified: screen is now awake)",
+                        "text": f"{_get_tv_devices()[device]['name']} turned on successfully (verified: screen is now awake)",
                     }
                 ]
             }
@@ -675,7 +683,7 @@ async def turn_off(args: dict[str, Any]) -> dict[str, Any]:
                     "content": [
                         {
                             "type": "text",
-                            "text": f"{TV_DEVICES[device]['name']} was already off (verified: screen is asleep)",
+                            "text": f"{_get_tv_devices()[device]['name']} was already off (verified: screen is asleep)",
                         }
                     ]
                 }
@@ -683,7 +691,7 @@ async def turn_off(args: dict[str, Any]) -> dict[str, Any]:
                 "content": [
                     {
                         "type": "text",
-                        "text": f"{TV_DEVICES[device]['name']} turned off successfully (verified: screen is now asleep)",
+                        "text": f"{_get_tv_devices()[device]['name']} turned off successfully (verified: screen is now asleep)",
                     }
                 ]
             }
@@ -767,7 +775,7 @@ async def volume(args: dict[str, Any]) -> dict[str, Any]:
     # Build result with verification
     result = {
         "action": action,
-        "device": TV_DEVICES[device]["name"],
+        "device": _get_tv_devices()[device]["name"],
         "verified": False,
     }
 
@@ -824,7 +832,7 @@ async def screenshot(args: dict[str, Any]) -> dict[str, Any]:
         img_base64 = base64.b64encode(result.stdout).decode("utf-8")
         return {
             "content": [
-                {"type": "text", "text": f"Screenshot from {TV_DEVICES[device]['name']}:"},
+                {"type": "text", "text": f"Screenshot from {_get_tv_devices()[device]['name']}:"},
                 {
                     "type": "image",
                     "source": {"type": "base64", "media_type": "image/png", "data": img_base64},
@@ -887,7 +895,7 @@ async def type_text(args: dict[str, Any]) -> dict[str, Any]:
     result = {
         "action": "type_text",
         "text_sent": text,
-        "device": TV_DEVICES[device]["name"],
+        "device": _get_tv_devices()[device]["name"],
         "current_context": status.get("context"),
         "current_app": status.get("foreground"),
         "verification_note": "Text input sent successfully. Use screenshot tool to visually confirm text appeared in the input field.",
@@ -924,7 +932,7 @@ async def get_tv_status(args: dict[str, Any]) -> dict[str, Any]:
     stdout, stderr, code = _run_adb(device, "shell", cmd)
 
     status = {
-        "device": TV_DEVICES[device]["name"],
+        "device": _get_tv_devices()[device]["name"],
         "screen": "unknown",
         "current_app": None,
         "playback": None,
@@ -1022,14 +1030,17 @@ async def list_apps(args: dict[str, Any]) -> dict[str, Any]:
             "content": [
                 {
                     "type": "text",
-                    "text": f"Streaming apps on {TV_DEVICES[device]['name']}:\n{apps_list}",
+                    "text": f"Streaming apps on {_get_tv_devices()[device]['name']}:\n{apps_list}",
                 }
             ]
         }
     else:
         return {
             "content": [
-                {"type": "text", "text": f"No streaming apps found on {TV_DEVICES[device]['name']}"}
+                {
+                    "type": "text",
+                    "text": f"No streaming apps found on {_get_tv_devices()[device]['name']}",
+                }
             ]
         }
 
@@ -1039,7 +1050,7 @@ async def list_tvs(args: dict[str, Any]) -> dict[str, Any]:
     """List available TVs with status."""
     results = []
 
-    for device_id, config in TV_DEVICES.items():
+    for device_id, config in _get_tv_devices().items():
         addr = f"{config['ip']}:{config['port']}"
 
         # Check if connected

@@ -5,45 +5,32 @@ __pycache__/
 *.so
 .Python
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
 
 # Virtual environments
 .venv/
 venv/
-ENV/
 
 # IDE
 .idea/
 .vscode/
+.cursor/
 *.swp
 *.swo
 *~
 
-# Environment variables
+# Environment
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # Logs
 *.log
-logs/
 
 # OS
 .DS_Store
-Thumbs.db
 
-# Project specific
-server.log
+# Project
+config.py

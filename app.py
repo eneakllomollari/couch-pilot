@@ -382,14 +382,15 @@ def _get_tv_status_message(device_id: str) -> str:
         return "No TV configured."
 
     try:
-        # Quick status check via ADB
+        # Quick status check via ADB (use || true to ignore grep exit codes)
         cmd = (
-            "dumpsys power | grep mWakefulness; "
-            "dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp'"
+            "dumpsys power | grep mWakefulness || true; "
+            "dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' || true"
         )
         stdout, _, code = _adb(device_id, "shell", cmd)
 
-        if code != 0:
+        # Check if we got any output (ADB connected)
+        if not stdout.strip():
             return f"{tv.name} is offline."
 
         screen_on = False

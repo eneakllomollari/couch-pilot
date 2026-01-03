@@ -78,7 +78,6 @@ class Config(BaseSettings):
         return v
 
     def get_tapo_bulbs(self) -> dict[str, dict[str, Any]]:
-        """Generate bulb device configs from IP list."""
         bulbs = {}
         for i, ip in enumerate(self.tapo_bulb_ips, 1):
             bulbs[f"bulb_{i}"] = {
@@ -90,7 +89,6 @@ class Config(BaseSettings):
         return bulbs
 
     def get_all_devices(self) -> dict[str, dict[str, Any]]:
-        """Get all devices as a combined dictionary."""
         devices: dict[str, dict[str, Any]] = {}
 
         # Add TV devices
@@ -112,5 +110,4 @@ class Config(BaseSettings):
 
 @lru_cache
 def get_config() -> Config:
-    """Get cached configuration instance."""
     return Config()

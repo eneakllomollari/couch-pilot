@@ -1,5 +1,10 @@
 # Couch Pilot
 
+[![CI](https://github.com/eneakllomollari/couch-pilot/actions/workflows/ci.yml/badge.svg)](https://github.com/eneakllomollari/couch-pilot/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/eneakllomollari/couch-pilot/graph/badge.svg)](https://codecov.io/gh/eneakllomollari/couch-pilot)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+
 AI-powered TV control via natural language chat. Control your Fire TV and Google TV devices by simply telling them what to do.
 
 > **Security Note**: This application is designed for local network use only. Do not expose to the public internet.

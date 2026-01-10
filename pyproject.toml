@@ -3,7 +3,7 @@ name = "couch-pilot"
 version = "0.1.0"
 description = "AI-powered TV control via natural language chat"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi[standard]>=0.115.0",
     "uvicorn[standard]>=0.32.0",

@@ -4,7 +4,7 @@ AI-powered TV control using Claude Agent SDK + smart bulb control.
 
 ## Stack
 
-- Python 3.14+
+- Python 3.12+
 - FastAPI (web framework)
 - Claude Agent SDK (AI integration)
 - uv (package manager)

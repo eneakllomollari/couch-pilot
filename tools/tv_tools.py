@@ -2,8 +2,7 @@
 
 import asyncio
 import base64
-import json
-import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -25,8 +24,12 @@ def _get_tv_devices() -> dict[str, dict[str, Any]]:
 # Cache for discovered packages per device
 _package_cache: dict[str, dict[str, str]] = {}
 
+# Status cache to reduce slow ADB calls (device -> (status, timestamp))
+_status_cache: dict[str, tuple[dict, float]] = {}
+_status_cache_duration = 2.0  # seconds
 
-def _get_package(device: str, app: str) -> str | None:
+
+async def _get_package(device: str, app: str) -> str | None:
     """Get package name for an app on a device by querying it."""
     tv_devices = _get_tv_devices()
     addr = f"{tv_devices[device]['ip']}:{tv_devices[device]['port']}"
@@ -46,17 +49,30 @@ def _get_package(device: str, app: str) -> str | None:
     if app not in patterns:
         return None
 
-    result = subprocess.run(
-        ["adb", "-s", addr, "shell", "pm", "list", "packages"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "adb",
+            "-s",
+            addr,
+            "shell",
+            "pm",
+            "list",
+            "packages",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
 
-    if result.returncode != 0:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        result_stdout = stdout.decode()
+        returncode = proc.returncode
+
+    except TimeoutError:
         return None
 
-    packages = result.stdout.strip().split("\n")
+    if returncode != 0:
+        return None
+
+    packages = result_stdout.strip().split("\n")
     for pattern in patterns[app]:
         for pkg_line in packages:
             pkg = pkg_line.replace("package:", "").strip()
@@ -79,12 +95,66 @@ def _get_device_address(device: str) -> str:
     return f"{d['ip']}:{d['port']}"
 
 
-def _run_adb(device: str, *args: str, timeout: int = 10) -> tuple[str, str, int]:
-    """Run ADB command and return stdout, stderr, returncode."""
+async def _run_adb(
+    device: str, *args: str, timeout: int = 10, retries: int = 2
+) -> tuple[str, str, int]:
+    """Run ADB command asynchronously with retry logic for transient failures.
+
+    Args:
+        device: Device ID from configuration
+        *args: ADB command arguments
+        timeout: Command timeout in seconds (default: 10)
+        retries: Number of retries for transient failures (default: 2)
+
+    Returns:
+        Tuple of (stdout, stderr, returncode)
+    """
     addr = _get_device_address(device)
     cmd = ["adb", "-s", addr] + list(args)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    return result.stdout, result.stderr, result.returncode
+
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stderr_text = stderr.decode()
+
+            # Success or non-retryable error - return immediately
+            if proc.returncode == 0 or not _is_transient_adb_error(stderr_text):
+                return stdout.decode(), stderr_text, proc.returncode or 0
+
+            # Transient error detected - retry with exponential backoff
+            last_error = stderr_text
+            if attempt < retries:
+                await asyncio.sleep(0.5 * (attempt + 1))  # 0.5s, 1.0s, 1.5s...
+                continue
+
+        except TimeoutError:
+            # Kill process if it times out
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return "", "Command timed out", -1
+
+    # All retries exhausted
+    return "", f"Failed after {retries} retries: {last_error}", -1
+
+
+def _is_transient_adb_error(stderr: str) -> bool:
+    """Check if ADB error is transient and worth retrying."""
+    transient_patterns = [
+        "device offline",
+        "device not found",
+        "connection refused",
+        "connection reset",
+        "broken pipe",
+    ]
+    stderr_lower = stderr.lower()
+    return any(pattern in stderr_lower for pattern in transient_patterns)
 
 
 # ============= HIGH-LEVEL TOOLS =============
@@ -174,10 +244,10 @@ def _normalize_url(url: str) -> str:
     return url
 
 
-def _appletv_component(device: str) -> str | None:
+async def _appletv_component(device: str) -> str | None:
     """Return Apple TV main activity component for the device (if installed/known)."""
     # Prefer installed package detection for flexibility.
-    pkg = _get_package(device, "appletv")
+    pkg = await _get_package(device, "appletv")
     if pkg:
         return f"{pkg}/.MainActivity"
     # Fallback known package names.
@@ -214,7 +284,7 @@ async def _wait_for_playing(device: str, timeout_s: int = 20) -> bool:
     last_pos: int | None = None
 
     while time.time() - start < timeout_s:
-        stdout, _, _ = _run_adb(device, "shell", "dumpsys", "media_session", timeout=8)
+        stdout, _, _ = await _run_adb(device, "shell", "dumpsys", "media_session", timeout=8)
         state, pos, speed = _parse_playback_state(stdout)
         # PlaybackState: 3=playing, 2=paused, 6=buffering (common)
         if state == 3 and speed and speed > 0:
@@ -245,18 +315,28 @@ async def play(args: dict[str, Any]) -> dict[str, Any]:
 
     # For Netflix/HBO Max/Apple TV: wake TV first
     if is_netflix or is_hbomax or is_appletv:
-        subprocess.run(
-            ["adb", "-s", addr, "shell", "input", "keyevent", "KEYCODE_WAKEUP"],
-            capture_output=True,
-            timeout=3,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "adb",
+                "-s",
+                addr,
+                "shell",
+                "input",
+                "keyevent",
+                "KEYCODE_WAKEUP",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=3.0)
+        except TimeoutError:
+            pass  # Best effort wakeup
 
     # Detect app from URL to get package for Fire TV special handling
     package = None
     if "youtube" in url or "youtu.be" in url:
-        package = _get_package(device, "youtube")
+        package = await _get_package(device, "youtube")
     elif is_netflix:
-        package = _get_package(device, "netflix")
+        package = await _get_package(device, "netflix")
 
     # Build command
     if package and ("amazon" in package or "firetv" in package) and "youtube" in url:
@@ -277,7 +357,7 @@ async def play(args: dict[str, Any]) -> dict[str, Any]:
         ]
     elif is_appletv:
         # Apple TV on Fire TV: force explicit component to avoid Amazon intercept/"Open with"
-        component = _appletv_component(device)
+        component = await _appletv_component(device)
         if component:
             cmd = [
                 "adb",
@@ -335,11 +415,22 @@ async def play(args: dict[str, Any]) -> dict[str, Any]:
             url,
         ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        result_stderr = stderr.decode()
+        returncode = proc.returncode
+    except TimeoutError:
         return {
-            "content": [{"type": "text", "text": f"Failed: {result.stderr}"}],
+            "content": [{"type": "text", "text": "Command timed out"}],
+            "is_error": True,
+        }
+
+    if returncode != 0:
+        return {
+            "content": [{"type": "text", "text": f"Failed: {result_stderr}"}],
             "is_error": True,
         }
 
@@ -348,24 +439,45 @@ async def play(args: dict[str, Any]) -> dict[str, Any]:
     if is_netflix or is_hbomax or is_appletv:
         await asyncio.sleep(3)  # Wait for app to load title page
 
-        # Keep pressing select until playback starts - be persistent (up to 15 tries over ~90 seconds)
-        for _attempt in range(15):
-            subprocess.run(
-                ["adb", "-s", addr, "shell", "input", "keyevent", "KEYCODE_DPAD_CENTER"],
-                capture_output=True,
-                timeout=3,
-            )
-            if await _wait_for_playing(device, timeout_s=6):
+        # Try pressing select up to 3 times intelligently (reduced from 15 to avoid being annoying)
+        for attempt in range(3):
+            # Check current state first
+            status = await _get_status(device)
+
+            # If already playing, we're done
+            if "playing" in status.get("state", "").lower():
                 playback_started = True
                 break
 
-            # Check if we're stuck on profile selection or other screens
-            status = await _get_status(device)
+            # If on profile selection, wait longer (not our fault)
             context = status.get("context", "").lower() if status.get("context") else ""
-
-            # If on profile selection, wait longer for user or try select again
             if "profile" in context:
-                await asyncio.sleep(2)  # Give more time for profile screen
+                if attempt == 0:  # Only wait once
+                    await asyncio.sleep(5)  # Give time for user to select profile
+                continue
+
+            # Press select and check if playback started
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "adb",
+                    "-s",
+                    addr,
+                    "shell",
+                    "input",
+                    "keyevent",
+                    "KEYCODE_DPAD_CENTER",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=3.0)
+            except TimeoutError:
+                pass  # Continue trying
+
+            # Wait briefly and check if playback started (reduced from 6s to 3s)
+            await asyncio.sleep(2)
+            if await _wait_for_playing(device, timeout_s=3):
+                playback_started = True
+                break
     else:
         # For YouTube and other apps, check if playback started
         await asyncio.sleep(2)
@@ -373,28 +485,50 @@ async def play(args: dict[str, Any]) -> dict[str, Any]:
 
     # Get final status and verify playback
     status = await _get_status(device)
-    status["playback_verified"] = playback_started
 
     if not playback_started:
-        status["warning"] = (
-            "Playback may not have started. Check TV screen or use screenshot tool to verify."
+        # Playback not verified - return warning
+        msg = (
+            f"Content opened but playback not verified. TV state: {status.get('state', 'unknown')}"
         )
+        if status.get("context"):
+            msg += f", Context: {status['context']}"
         return {
-            "content": [{"type": "text", "text": json.dumps(status, indent=2)}],
-            "is_error": True,
+            "content": [{"type": "text", "text": msg}],
+            "is_error": False,  # Not an error - content was opened
         }
 
-    return {"content": [{"type": "text", "text": json.dumps(status, indent=2)}]}
+    # Success - playback started
+    msg = f"Playing on {status.get('foreground', 'TV')}"
+    if status.get("state"):
+        msg += f" - {status['state']}"
+    return {"content": [{"type": "text", "text": msg}]}
 
 
-async def _get_status(device: str) -> dict:
-    """Get TV status with human-readable context."""
+async def _get_status(device: str, use_cache: bool = True) -> dict:
+    """Get TV status with human-readable context. Cached for 2 seconds to reduce ADB calls.
+
+    Args:
+        device: Device ID from configuration
+        use_cache: If True, return cached status if available (default: True)
+
+    Returns:
+        Status dict with screen, foreground, state, context
+    """
+    # Check cache
+    now = time.time()
+    if use_cache and device in _status_cache:
+        cached_status, cached_time = _status_cache[device]
+        if now - cached_time < _status_cache_duration:
+            return cached_status
+
+    # Cache miss or expired - fetch fresh status
     status_cmd = (
         "dumpsys power | grep -E 'mWakefulness'; "
         "dumpsys window windows | grep -E 'mCurrentFocus'; "
         "dumpsys media_session | grep -E 'state=PlaybackState|description='"
     )
-    stdout, _, _ = _run_adb(device, "shell", status_cmd)
+    stdout, _, _ = await _run_adb(device, "shell", status_cmd)
 
     status = {
         "screen": "unknown",
@@ -465,6 +599,9 @@ async def _get_status(device: str) -> dict:
     else:
         status["state"] = "idle"
 
+    # Cache the status
+    _status_cache[device] = (status, now)
+
     return status
 
 
@@ -503,11 +640,11 @@ async def navigate(args: dict[str, Any]) -> dict[str, Any]:
         }
 
     # Capture state before navigation for comparison
-    before_stdout, _, _ = _run_adb(
+    before_stdout, _, _ = await _run_adb(
         device, "shell", "dumpsys window windows | grep -E 'mCurrentFocus'"
     )
 
-    stdout, stderr, code = _run_adb(device, "shell", "input", "keyevent", key_map[action])
+    stdout, stderr, code = await _run_adb(device, "shell", "input", "keyevent", key_map[action])
 
     if code != 0:
         return {
@@ -522,19 +659,20 @@ async def navigate(args: dict[str, Any]) -> dict[str, Any]:
     status = await _get_status(device)
 
     # Check if focus changed (for actions like select, back, home)
-    after_stdout, _, _ = _run_adb(
+    after_stdout, _, _ = await _run_adb(
         device, "shell", "dumpsys window windows | grep -E 'mCurrentFocus'"
     )
     focus_changed = before_stdout.strip() != after_stdout.strip()
 
-    result = {
-        "action": action,
-        "device": _get_tv_devices()[device]["name"],
-        "focus_changed": focus_changed,
-        "current_state": status,
-    }
+    # Return concise message
+    device_name = _get_tv_devices()[device]["name"]
+    msg = f"{action.title()} on {device_name}"
+    if status:
+        msg += f" - {status}"
+    if focus_changed:
+        msg += " (screen changed)"
 
-    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+    return {"content": [{"type": "text", "text": msg}]}
 
 
 @tool("play_pause", "Toggle play/pause on the TV.", {"device": str})
@@ -543,12 +681,12 @@ async def play_pause(args: dict[str, Any]) -> dict[str, Any]:
     device = args["device"]
 
     # Get playback state before
-    before_stdout, _, _ = _run_adb(
+    before_stdout, _, _ = await _run_adb(
         device, "shell", "dumpsys media_session | grep -E 'state=PlaybackState'"
     )
     before_state, _, _ = _parse_playback_state(before_stdout)
 
-    stdout, stderr, code = _run_adb(
+    stdout, stderr, code = await _run_adb(
         device, "shell", "input", "keyevent", "KEYCODE_MEDIA_PLAY_PAUSE"
     )
 
@@ -561,7 +699,7 @@ async def play_pause(args: dict[str, Any]) -> dict[str, Any]:
     # Wait for state change and verify
     await asyncio.sleep(0.5)
 
-    after_stdout, _, _ = _run_adb(
+    after_stdout, _, _ = await _run_adb(
         device, "shell", "dumpsys media_session | grep -E 'state=PlaybackState'"
     )
     after_state, _, _ = _parse_playback_state(after_stdout)
@@ -608,11 +746,11 @@ async def turn_on(args: dict[str, Any]) -> dict[str, Any]:
     device = args["device"]
 
     # Get initial state
-    initial_stdout, _, _ = _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
+    initial_stdout, _, _ = await _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
     was_already_on = "Awake" in initial_stdout
 
     # Send wakeup command
-    stdout, stderr, code = _run_adb(device, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
+    stdout, stderr, code = await _run_adb(device, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
 
     if code != 0:
         return {
@@ -623,7 +761,7 @@ async def turn_on(args: dict[str, Any]) -> dict[str, Any]:
     # Verify the TV is now awake (retry up to 3 times with delays)
     for _attempt in range(3):
         await asyncio.sleep(1)
-        verify_stdout, _, _ = _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
+        verify_stdout, _, _ = await _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
         if "Awake" in verify_stdout:
             if was_already_on:
                 return {
@@ -661,11 +799,11 @@ async def turn_off(args: dict[str, Any]) -> dict[str, Any]:
     device = args["device"]
 
     # Get initial state
-    initial_stdout, _, _ = _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
+    initial_stdout, _, _ = await _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
     was_already_off = "Asleep" in initial_stdout
 
     # Send sleep command
-    stdout, stderr, code = _run_adb(device, "shell", "input", "keyevent", "KEYCODE_SLEEP")
+    stdout, stderr, code = await _run_adb(device, "shell", "input", "keyevent", "KEYCODE_SLEEP")
 
     if code != 0:
         return {
@@ -676,7 +814,7 @@ async def turn_off(args: dict[str, Any]) -> dict[str, Any]:
     # Verify the TV is now asleep (retry up to 3 times with delays)
     for _attempt in range(3):
         await asyncio.sleep(1)
-        verify_stdout, _, _ = _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
+        verify_stdout, _, _ = await _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
         if "Asleep" in verify_stdout:
             if was_already_off:
                 return {
@@ -708,11 +846,11 @@ async def turn_off(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _get_volume(device: str) -> tuple[int | None, bool | None]:
+async def _get_volume(device: str) -> tuple[int | None, bool | None]:
     """Get current volume level and mute state from audio service."""
     import re
 
-    stdout, _, _ = _run_adb(device, "shell", "dumpsys audio | grep -E 'STREAM_MUSIC|muted'")
+    stdout, _, _ = await _run_adb(device, "shell", "dumpsys audio | grep -E 'STREAM_MUSIC|muted'")
 
     volume = None
     muted = None
@@ -756,9 +894,9 @@ async def volume(args: dict[str, Any]) -> dict[str, Any]:
         }
 
     # Get volume before
-    before_vol, before_muted = _get_volume(device)
+    before_vol, before_muted = await _get_volume(device)
 
-    stdout, stderr, code = _run_adb(device, "shell", "input", "keyevent", key_map[action])
+    stdout, stderr, code = await _run_adb(device, "shell", "input", "keyevent", key_map[action])
 
     if code != 0:
         return {
@@ -770,7 +908,7 @@ async def volume(args: dict[str, Any]) -> dict[str, Any]:
     await asyncio.sleep(0.3)
 
     # Get volume after
-    after_vol, after_muted = _get_volume(device)
+    after_vol, after_muted = await _get_volume(device)
 
     # Build result with verification
     result = {
@@ -801,13 +939,15 @@ async def volume(args: dict[str, Any]) -> dict[str, Any]:
         else:
             result["message"] = "Volume command sent but could not verify level"
 
+    # Return concise message
+    msg = result.get("message", "Volume command sent")
     if not result["verified"]:
         return {
-            "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
+            "content": [{"type": "text", "text": msg}],
             "is_error": True,
         }
 
-    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+    return {"content": [{"type": "text", "text": msg}]}
 
 
 @tool("screenshot", "Take a screenshot of the TV screen.", {"device": str})
@@ -818,18 +958,32 @@ async def screenshot(args: dict[str, Any]) -> dict[str, Any]:
 
     # Take screenshot and save locally
     tmp_path = Path(f"/tmp/tv_screenshot_{device}.png")
-    result = subprocess.run(
-        ["adb", "-s", addr, "exec-out", "screencap", "-p"],
-        capture_output=True,
-        timeout=10,
-    )
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "adb",
+            "-s",
+            addr,
+            "exec-out",
+            "screencap",
+            "-p",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        result_stdout, result_stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        result_returncode = proc.returncode
+    except TimeoutError:
+        return {
+            "content": [{"type": "text", "text": "Screenshot command timed out"}],
+            "is_error": True,
+        }
 
     # Validate output is a PNG. Some apps (DRM/secure video surfaces) return empty/invalid.
-    if result.returncode == 0 and result.stdout and result.stdout.startswith(b"\x89PNG\r\n\x1a\n"):
-        tmp_path.write_bytes(result.stdout)
+    if result_returncode == 0 and result_stdout and result_stdout.startswith(b"\x89PNG\r\n\x1a\n"):
+        tmp_path.write_bytes(result_stdout)
 
         # Return as base64 image
-        img_base64 = base64.b64encode(result.stdout).decode("utf-8")
+        img_base64 = base64.b64encode(result_stdout).decode("utf-8")
         return {
             "content": [
                 {"type": "text", "text": f"Screenshot from {_get_tv_devices()[device]['name']}:"},
@@ -846,8 +1000,8 @@ async def screenshot(args: dict[str, Any]) -> dict[str, Any]:
                 "type": "text",
                 "text": (
                     "Screenshot failed (often DRM/secure video blocks capture on Fire TV). "
-                    f"returncode={result.returncode}, bytes={len(result.stdout) if result.stdout else 0}, "
-                    f"stderr={result.stderr.decode() if result.stderr else 'No output'}"
+                    f"returncode={result_returncode}, bytes={len(result_stdout) if result_stdout else 0}, "
+                    f"stderr={result_stderr.decode() if result_stderr else 'No output'}"
                 ),
             }
         ],
@@ -871,14 +1025,14 @@ async def type_text(args: dict[str, Any]) -> dict[str, Any]:
     text = args["text"]
 
     # Check if there's a focused window that might accept input
-    focus_stdout, _, _ = _run_adb(
+    focus_stdout, _, _ = await _run_adb(
         device, "shell", "dumpsys window windows | grep -E 'mCurrentFocus'"
     )
 
     # Escape special characters for ADB
     escaped = text.replace(" ", "%s").replace("'", "\\'").replace('"', '\\"')
 
-    stdout, stderr, code = _run_adb(device, "shell", "input", "text", escaped)
+    stdout, stderr, code = await _run_adb(device, "shell", "input", "text", escaped)
 
     if code != 0:
         return {
@@ -892,26 +1046,14 @@ async def type_text(args: dict[str, Any]) -> dict[str, Any]:
     # Get current state for context
     status = await _get_status(device)
 
-    result = {
-        "action": "type_text",
-        "text_sent": text,
-        "device": _get_tv_devices()[device]["name"],
-        "current_context": status.get("context"),
-        "current_app": status.get("foreground"),
-        "verification_note": "Text input sent successfully. Use screenshot tool to visually confirm text appeared in the input field.",
-    }
-
-    # Warn if the context doesn't look like an input screen
+    # Check if the context looks like an input screen
     context = status.get("context", "").lower() if status.get("context") else ""
     if "search" in context or "input" in context or "edit" in context:
-        result["likely_input_field"] = True
+        msg = f"Text '{text}' sent successfully. Context: {status.get('context')}"
     else:
-        result["likely_input_field"] = False
-        result["warning"] = (
-            f"Current context '{status.get('context')}' may not be an input field. Text may not have been entered."
-        )
+        msg = f"Text '{text}' sent, but current context '{status.get('context')}' may not be an input field. Use screenshot to verify."
 
-    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+    return {"content": [{"type": "text", "text": msg}]}
 
 
 @tool(
@@ -929,7 +1071,7 @@ async def get_tv_status(args: dict[str, Any]) -> dict[str, Any]:
         "dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp'; "
         "dumpsys media_session | grep -E 'state=PlaybackState|description='"
     )
-    stdout, stderr, code = _run_adb(device, "shell", cmd)
+    stdout, stderr, code = await _run_adb(device, "shell", cmd)
 
     status = {
         "device": _get_tv_devices()[device]["name"],
@@ -970,7 +1112,21 @@ async def get_tv_status(args: dict[str, Any]) -> dict[str, Any]:
             if desc:
                 status["media_title"] = desc
 
-    return {"content": [{"type": "text", "text": json.dumps(status, indent=2)}]}
+    # Format concise human-readable status
+    if status["screen"] == "off":
+        status_text = f"{status['device']}: Screen off"
+    else:
+        parts = [f"{status['device']}: Screen {status['screen']}"]
+        if status["current_app"]:
+            app_name = status["current_app"].split(".")[-1].title()
+            parts.append(f"App: {app_name}")
+        if status["playback"]:
+            parts.append(f"Playback: {status['playback']}")
+        if status["media_title"]:
+            parts.append(f"Title: {status['media_title']}")
+        status_text = ", ".join(parts)
+
+    return {"content": [{"type": "text", "text": status_text}]}
 
 
 @tool("list_apps", "List streaming apps installed on a TV.", {"device": str})
@@ -980,20 +1136,33 @@ async def list_apps(args: dict[str, Any]) -> dict[str, Any]:
     addr = _get_device_address(device)
 
     # Get all packages
-    result = subprocess.run(
-        ["adb", "-s", addr, "shell", "pm", "list", "packages"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-
-    if result.returncode != 0:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "adb",
+            "-s",
+            addr,
+            "shell",
+            "pm",
+            "list",
+            "packages",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        result_stdout, result_stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        result_returncode = proc.returncode
+    except TimeoutError:
         return {
-            "content": [{"type": "text", "text": f"Failed to list apps: {result.stderr}"}],
+            "content": [{"type": "text", "text": "List apps command timed out"}],
             "is_error": True,
         }
 
-    packages = result.stdout.strip().split("\n")
+    if result_returncode != 0:
+        return {
+            "content": [{"type": "text", "text": f"Failed to list apps: {result_stderr.decode()}"}],
+            "is_error": True,
+        }
+
+    packages = result_stdout.decode().strip().split("\n")
 
     # Filter for streaming/media apps
     streaming_keywords = [
@@ -1055,14 +1224,22 @@ async def list_tvs(args: dict[str, Any]) -> dict[str, Any]:
 
         # Check if connected
         try:
-            result = subprocess.run(
-                ["adb", "-s", addr, "get-state"],
-                capture_output=True,
-                text=True,
-                timeout=3,
+            proc = await asyncio.create_subprocess_exec(
+                "adb",
+                "-s",
+                addr,
+                "get-state",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            status = "Online" if result.returncode == 0 and "device" in result.stdout else "Offline"
-        except subprocess.TimeoutExpired:
+            result_stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+            result_returncode = proc.returncode
+            status = (
+                "Online"
+                if result_returncode == 0 and "device" in result_stdout.decode()
+                else "Offline"
+            )
+        except TimeoutError:
             status = "Offline"
         except Exception:
             status = "Unknown"

@@ -4,13 +4,27 @@ import asyncio
 import base64
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import structlog
 from claude_agent_sdk import create_sdk_mcp_server, tool
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from config import get_config
+
+log = structlog.get_logger(__name__)
+
+
+# Retry decorator for ADB commands that may fail transiently
+_adb_retry = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception_type((subprocess.TimeoutExpired, ConnectionError)),
+    reraise=True,
+)
 
 
 def _get_tv_devices() -> dict[str, dict[str, Any]]:
@@ -22,17 +36,53 @@ def _get_tv_devices() -> dict[str, dict[str, Any]]:
     }
 
 
-# Cache for discovered packages per device
+# Cache for discovered packages per device with TTL
 _package_cache: dict[str, dict[str, str]] = {}
+_cache_timestamps: dict[str, float] = {}
+_CACHE_TTL_SECONDS = 300  # 5 minutes
+
+
+def _is_cache_valid(device: str) -> bool:
+    """Check if the cache for a device is still valid."""
+    if device not in _cache_timestamps:
+        return False
+    return time.time() - _cache_timestamps[device] < _CACHE_TTL_SECONDS
+
+
+def _clear_expired_caches() -> None:
+    """Clear expired cache entries to prevent unbounded growth."""
+    current_time = time.time()
+    expired_devices = [
+        device
+        for device, timestamp in _cache_timestamps.items()
+        if current_time - timestamp >= _CACHE_TTL_SECONDS
+    ]
+    for device in expired_devices:
+        _package_cache.pop(device, None)
+        _cache_timestamps.pop(device, None)
 
 
 def _get_package(device: str, app: str) -> str | None:
-    """Get package name for an app on a device by querying it."""
+    """Get package name for an app on a device by querying it.
+
+    Uses a TTL-based cache to avoid repeated ADB queries. Cache entries
+    expire after 5 minutes.
+
+    Args:
+        device: Device ID to query.
+        app: App name (youtube, netflix, prime, appletv).
+
+    Returns:
+        Package name if found, None otherwise.
+    """
     tv_devices = _get_tv_devices()
     addr = f"{tv_devices[device]['ip']}:{tv_devices[device]['port']}"
 
-    # Check cache first
-    if device in _package_cache and app in _package_cache[device]:
+    # Clear expired caches periodically
+    _clear_expired_caches()
+
+    # Check cache first (only if valid)
+    if _is_cache_valid(device) and device in _package_cache and app in _package_cache[device]:
         return _package_cache[device][app]
 
     # Query device for installed packages
@@ -46,12 +96,19 @@ def _get_package(device: str, app: str) -> str | None:
     if app not in patterns:
         return None
 
-    result = subprocess.run(
-        ["adb", "-s", addr, "shell", "pm", "list", "packages"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
+    try:
+        result = subprocess.run(
+            ["adb", "-s", addr, "shell", "pm", "list", "packages"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("Package discovery timed out", device=device)
+        return None
+    except subprocess.SubprocessError as e:
+        log.warning("Package discovery failed", device=device, error=str(e))
+        return None
 
     if result.returncode != 0:
         return None
@@ -61,10 +118,11 @@ def _get_package(device: str, app: str) -> str | None:
         for pkg_line in packages:
             pkg = pkg_line.replace("package:", "").strip()
             if pattern in pkg.lower():
-                # Cache it
+                # Cache it with timestamp
                 if device not in _package_cache:
                     _package_cache[device] = {}
                 _package_cache[device][app] = pkg
+                _cache_timestamps[device] = time.time()
                 return pkg
 
     return None
@@ -80,11 +138,40 @@ def _get_device_address(device: str) -> str:
 
 
 def _run_adb(device: str, *args: str, timeout: int = 10) -> tuple[str, str, int]:
-    """Run ADB command and return stdout, stderr, returncode."""
+    """Run ADB command and return stdout, stderr, returncode.
+
+    Args:
+        device: Device ID to target.
+        *args: ADB command arguments.
+        timeout: Command timeout in seconds.
+
+    Returns:
+        Tuple of (stdout, stderr, returncode).
+
+    Raises:
+        subprocess.TimeoutExpired: If command times out.
+        ValueError: If device is unknown.
+    """
     addr = _get_device_address(device)
     cmd = ["adb", "-s", addr] + list(args)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    return result.stdout, result.stderr, result.returncode
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0 and result.stderr:
+            log.debug(
+                "ADB command returned error",
+                device=device,
+                cmd=args[0] if args else "unknown",
+                stderr=result.stderr[:100],
+            )
+        return result.stdout, result.stderr, result.returncode
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "ADB command timed out",
+            device=device,
+            cmd=args[0] if args else "unknown",
+            timeout=timeout,
+        )
+        raise
 
 
 # ============= HIGH-LEVEL TOOLS =============
@@ -604,7 +691,10 @@ async def play_pause(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool("turn_on", "Wake/turn on the TV.", {"device": str})
 async def turn_on(args: dict[str, Any]) -> dict[str, Any]:
-    """Turn on/wake the TV and verify it actually woke up."""
+    """Turn on/wake the TV and verify it actually woke up.
+
+    Uses exponential backoff for verification retries.
+    """
     device = args["device"]
 
     # Get initial state
@@ -620,9 +710,11 @@ async def turn_on(args: dict[str, Any]) -> dict[str, Any]:
             "is_error": True,
         }
 
-    # Verify the TV is now awake (retry up to 3 times with delays)
-    for _attempt in range(3):
-        await asyncio.sleep(1)
+    # Verify the TV is now awake with exponential backoff (1s, 2s, 4s)
+    verify_stdout = ""
+    backoff_delays = [1, 2, 4]
+    for delay in backoff_delays:
+        await asyncio.sleep(delay)
         verify_stdout, _, _ = _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
         if "Awake" in verify_stdout:
             if was_already_on:
@@ -657,7 +749,10 @@ async def turn_on(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool("turn_off", "Sleep/turn off the TV.", {"device": str})
 async def turn_off(args: dict[str, Any]) -> dict[str, Any]:
-    """Turn off/sleep the TV and verify it actually went to sleep."""
+    """Turn off/sleep the TV and verify it actually went to sleep.
+
+    Uses exponential backoff for verification retries.
+    """
     device = args["device"]
 
     # Get initial state
@@ -673,9 +768,11 @@ async def turn_off(args: dict[str, Any]) -> dict[str, Any]:
             "is_error": True,
         }
 
-    # Verify the TV is now asleep (retry up to 3 times with delays)
-    for _attempt in range(3):
-        await asyncio.sleep(1)
+    # Verify the TV is now asleep with exponential backoff (1s, 2s, 4s)
+    verify_stdout = ""
+    backoff_delays = [1, 2, 4]
+    for delay in backoff_delays:
+        await asyncio.sleep(delay)
         verify_stdout, _, _ = _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
         if "Asleep" in verify_stdout:
             if was_already_off:

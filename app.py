@@ -1,12 +1,13 @@
 """Smart Home Chat Agent - FastAPI Application with Claude Agent SDK."""
 
 import json
-import logging
 import subprocess
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
+import structlog
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -19,23 +20,88 @@ from claude_agent_sdk import (
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import get_config
 from devices.tapo import TapoBulb
+from logging_config import setup_logging
 from tools.tv_tools import tv_server
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%H:%M:%S",
-)
-log = logging.getLogger("chat")
+# Configure structured logging
+setup_logging()
+log = structlog.get_logger(__name__)
+
+
+# =============================================================================
+# Response Models
+# =============================================================================
+
+
+class HealthResponse(BaseModel):
+    """Health check response."""
+
+    status: str = Field(description="Health status")
+
+
+class StatusResponse(BaseModel):
+    """TV status response."""
+
+    status: str = Field(description="Human-readable TV status message")
+
+
+class CommandResponse(BaseModel):
+    """Generic command response."""
+
+    ok: bool = Field(description="Whether the command succeeded")
+    error: str | None = Field(default=None, description="Error message if failed")
+
+
+class AppInfo(BaseModel):
+    """Streaming app information."""
+
+    package: str = Field(description="Package name")
+    name: str = Field(description="Display name")
+    logo: str | None = Field(default=None, description="Logo URL")
+    color: str | None = Field(default=None, description="Fallback color")
+
+
+class AppsResponse(BaseModel):
+    """List of installed apps response."""
+
+    apps: list[AppInfo] = Field(default_factory=list, description="List of streaming apps")
+    error: str | None = Field(default=None, description="Error message if failed")
+    configured: bool = Field(default=True, description="Whether device is configured")
+
+
+class BulbStateResponse(BaseModel):
+    """Bulb state response."""
+
+    device: str = Field(description="Device ID")
+    state: dict[str, Any] = Field(description="Current bulb state")
+    error: str | None = Field(default=None, description="Error message if failed")
+
+
+class BulbToggleResponse(BaseModel):
+    """Bulb toggle response."""
+
+    ok: bool = Field(description="Whether the command succeeded")
+    state: str | None = Field(default=None, description="New state (on/off)")
+    error: str | None = Field(default=None, description="Error message if failed")
 
 
 def build_system_prompt() -> str:
-    """Build system prompt with dynamic TV list."""
+    """Build the system prompt for the Claude agent.
+
+    Constructs a detailed system prompt that includes:
+    - List of available TV devices with connection info
+    - Netflix URL format requirements (must use netflix:// protocol)
+    - HBO Max and Apple TV+ deep linking rules
+    - Required workflow steps for verifying playback
+    - Available tools and device selection instructions
+
+    Returns:
+        Complete system prompt string for configuring Claude's behavior.
+    """
     config = get_config()
     tv_list = "\n".join(
         f"- {dev_id}{' (default)' if i == 0 else ''}: {tv.name} at {tv.ip}:{tv.port}"
@@ -109,6 +175,14 @@ DO NOT report success without calling get_tv_status first!"""
 
 
 app = FastAPI(title="Smart Home Chat Agent")
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    """Validate configuration and log status at startup."""
+    config = get_config()
+    config.log_config_status()
+
 
 static_path = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_path), name="static")
@@ -310,15 +384,16 @@ async def websocket_endpoint(websocket: WebSocket):
         log.info("SESSION ENDED - Client disconnected")
 
 
-@app.get("/api/health")
-async def health():
-    return {"status": "ok"}
+@app.get("/api/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    """Health check endpoint."""
+    return HealthResponse(status="ok")
 
 
-@app.get("/api/remote/status/{device}")
-async def remote_status(device: str) -> dict[str, Any]:
+@app.get("/api/remote/status/{device}", response_model=StatusResponse)
+async def remote_status(device: str) -> StatusResponse:
     """Get TV status message for display."""
-    return {"status": _get_tv_status_message(device)}
+    return StatusResponse(status=_get_tv_status_message(device))
 
 
 # =============================================================================
@@ -375,7 +450,24 @@ APP_NAMES = {
 
 
 def _get_tv_status_message(device_id: str) -> str:
-    """Get a human-readable TV status message."""
+    """Get a human-readable TV status message.
+
+    Queries the TV via ADB to determine:
+    - Power/wakefulness state (on/off/screensaver)
+    - Current foreground app (Netflix, YouTube, etc.)
+    - Playback state (playing/paused)
+    - Currently playing media title (if available)
+
+    Args:
+        device_id: The device identifier from config.
+
+    Returns:
+        Human-readable status string like:
+        - "Living Room TV: Playing Stranger Things"
+        - "Living Room TV: Netflix"
+        - "Living Room TV is off."
+        - "Living Room TV is not responding." (on timeout)
+    """
     config = get_config()
     tv = config.tv_devices.get(device_id)
     if not tv:
@@ -439,12 +531,24 @@ def _get_tv_status_message(device_id: str) -> str:
         else:
             return f"{tv.name} is on."
 
-    except Exception:
-        return f"{tv.name} selected."
+    except subprocess.TimeoutExpired:
+        log.warning("TV status check timed out", device=device_id, ip=tv.ip)
+        return f"{tv.name} is not responding."
+    except subprocess.SubprocessError as e:
+        log.warning("ADB command failed", device=device_id, error=str(e))
+        return f"{tv.name} connection failed."
+    except Exception as e:
+        log.error(
+            "Unexpected error getting TV status",
+            device=device_id,
+            error=str(e),
+            traceback=traceback.format_exc(),
+        )
+        return f"{tv.name} status unavailable."
 
 
-@app.post("/api/remote/navigate")
-async def remote_navigate(cmd: RemoteCommand) -> dict[str, Any]:
+@app.post("/api/remote/navigate", response_model=CommandResponse)
+async def remote_navigate(cmd: RemoteCommand) -> CommandResponse:
     """Navigate: up, down, left, right, select, back, home."""
     key_map = {
         "up": "KEYCODE_DPAD_UP",
@@ -457,31 +561,31 @@ async def remote_navigate(cmd: RemoteCommand) -> dict[str, Any]:
     }
     keycode = key_map.get(cmd.action)
     if not keycode:
-        return {"error": f"Unknown action: {cmd.action}"}
+        return CommandResponse(ok=False, error=f"Unknown action: {cmd.action}")
 
     stdout, stderr, rc = _adb(cmd.device, "shell", "input", "keyevent", keycode)
-    log.info(f"REMOTE: {cmd.device} navigate {cmd.action}")
-    return {"ok": rc == 0}
+    log.info("Remote navigate", device=cmd.device, action=cmd.action)
+    return CommandResponse(ok=rc == 0, error=stderr if rc != 0 else None)
 
 
-@app.post("/api/remote/play_pause")
-async def remote_play_pause(cmd: RemoteCommand) -> dict[str, Any]:
+@app.post("/api/remote/play_pause", response_model=CommandResponse)
+async def remote_play_pause(cmd: RemoteCommand) -> CommandResponse:
     """Toggle play/pause."""
     stdout, stderr, rc = _adb(cmd.device, "shell", "input", "keyevent", "KEYCODE_MEDIA_PLAY_PAUSE")
-    log.info(f"REMOTE: {cmd.device} play_pause")
-    return {"ok": rc == 0}
+    log.info("Remote play_pause", device=cmd.device)
+    return CommandResponse(ok=rc == 0, error=stderr if rc != 0 else None)
 
 
-@app.post("/api/remote/power")
-async def remote_power(cmd: RemoteCommand) -> dict[str, Any]:
+@app.post("/api/remote/power", response_model=CommandResponse)
+async def remote_power(cmd: RemoteCommand) -> CommandResponse:
     """Toggle power."""
     stdout, stderr, rc = _adb(cmd.device, "shell", "input", "keyevent", "KEYCODE_POWER")
-    log.info(f"REMOTE: {cmd.device} power")
-    return {"ok": rc == 0}
+    log.info("Remote power", device=cmd.device)
+    return CommandResponse(ok=rc == 0, error=stderr if rc != 0 else None)
 
 
-@app.post("/api/remote/volume")
-async def remote_volume(cmd: RemoteCommand) -> dict[str, Any]:
+@app.post("/api/remote/volume", response_model=CommandResponse)
+async def remote_volume(cmd: RemoteCommand) -> CommandResponse:
     """Volume: up, down, mute."""
     key_map = {
         "up": "KEYCODE_VOLUME_UP",
@@ -490,15 +594,15 @@ async def remote_volume(cmd: RemoteCommand) -> dict[str, Any]:
     }
     keycode = key_map.get(cmd.action)
     if not keycode:
-        return {"error": f"Unknown action: {cmd.action}"}
+        return CommandResponse(ok=False, error=f"Unknown action: {cmd.action}")
 
     stdout, stderr, rc = _adb(cmd.device, "shell", "input", "keyevent", keycode)
-    log.info(f"REMOTE: {cmd.device} volume {cmd.action}")
-    return {"ok": rc == 0}
+    log.info("Remote volume", device=cmd.device, action=cmd.action)
+    return CommandResponse(ok=rc == 0, error=stderr if rc != 0 else None)
 
 
-@app.get("/api/remote/apps/{device}")
-async def remote_list_apps(device: str) -> dict[str, Any]:
+@app.get("/api/remote/apps/{device}", response_model=AppsResponse)
+async def remote_list_apps(device: str) -> AppsResponse:
     """List streaming apps installed on device."""
     # Using simple-icons.org CDN for consistent logos
     streaming_apps = {
@@ -626,36 +730,35 @@ async def remote_list_apps(device: str) -> dict[str, Any]:
         stdout, stderr, rc = _adb(device, "shell", "pm", "list", "packages")
     except ValueError:
         # Device not configured
-        return {"apps": [], "configured": False}
+        return AppsResponse(apps=[], configured=False)
 
     if rc != 0:
-        return {"apps": [], "error": stderr}
+        return AppsResponse(apps=[], error=stderr)
 
     installed = {line.replace("package:", "").strip() for line in stdout.splitlines()}
-    apps = []
-    seen_names = set()
+    apps: list[AppInfo] = []
+    seen_names: set[str] = set()
     for pkg, info in streaming_apps.items():
         if pkg in installed and info["name"] not in seen_names:
             seen_names.add(info["name"])
-            app_data = {
-                "package": pkg,
-                "name": info["name"],
-            }
-            if info.get("logo"):
-                app_data["logo"] = info["logo"]
-            else:
-                app_data["color"] = info.get("color", "#3b82f6")
-            apps.append(app_data)
+            apps.append(
+                AppInfo(
+                    package=pkg,
+                    name=info["name"],
+                    logo=info.get("logo"),
+                    color=info.get("color", "#3b82f6") if not info.get("logo") else None,
+                )
+            )
 
-    log.info(f"REMOTE: {device} list_apps -> {len(apps)} apps")
-    return {"apps": apps}
+    log.info("Remote list_apps", device=device, app_count=len(apps))
+    return AppsResponse(apps=apps)
 
 
-@app.post("/api/remote/launch")
-async def remote_launch_app(cmd: RemoteCommand) -> dict[str, Any]:
+@app.post("/api/remote/launch", response_model=CommandResponse)
+async def remote_launch_app(cmd: RemoteCommand) -> CommandResponse:
     """Launch streaming app on device."""
     if not cmd.action:
-        return {"error": "App name required"}
+        return CommandResponse(ok=False, error="App name required")
 
     stdout, stderr, rc = _adb(
         cmd.device,
@@ -667,8 +770,8 @@ async def remote_launch_app(cmd: RemoteCommand) -> dict[str, Any]:
         "android.intent.category.LAUNCHER",
         "1",
     )
-    log.info(f"REMOTE: {cmd.device} launch {cmd.action}")
-    return {"ok": rc == 0}
+    log.info("Remote launch", device=cmd.device, app=cmd.action)
+    return CommandResponse(ok=rc == 0, error=stderr if rc != 0 else None)
 
 
 # =============================================================================
@@ -701,12 +804,12 @@ def get_bulb_instance(device_id: str) -> TapoBulb | None:
     )
 
 
-@app.post("/api/bulb/toggle")
-async def bulb_toggle(cmd: BulbCommand) -> dict[str, Any]:
+@app.post("/api/bulb/toggle", response_model=BulbToggleResponse)
+async def bulb_toggle(cmd: BulbCommand) -> BulbToggleResponse:
     """Toggle bulb on/off."""
     bulb = get_bulb_instance(cmd.device)
     if not bulb:
-        return {"error": f"Unknown bulb: {cmd.device}"}
+        return BulbToggleResponse(ok=False, error=f"Unknown bulb: {cmd.device}")
 
     # Get current state
     current_state = bulb.get_state()
@@ -715,21 +818,21 @@ async def bulb_toggle(cmd: BulbCommand) -> dict[str, Any]:
     # Toggle
     if is_on:
         success = bulb.turn_off()
-        action = "off"
+        new_state = "off"
     else:
         success = bulb.turn_on()
-        action = "on"
+        new_state = "on"
 
-    log.info(f"BULB: {cmd.device} turned {action}")
-    return {"ok": success, "state": action}
+    log.info("Bulb toggle", device=cmd.device, state=new_state)
+    return BulbToggleResponse(ok=success, state=new_state if success else None)
 
 
-@app.post("/api/bulb/control")
-async def bulb_control(cmd: BulbCommand) -> dict[str, Any]:
+@app.post("/api/bulb/control", response_model=CommandResponse)
+async def bulb_control(cmd: BulbCommand) -> CommandResponse:
     """Control bulb (on, off, brightness, color)."""
     bulb = get_bulb_instance(cmd.device)
     if not bulb:
-        return {"error": f"Unknown bulb: {cmd.device}"}
+        return CommandResponse(ok=False, error=f"Unknown bulb: {cmd.device}")
 
     success = False
     action = cmd.action.lower()
@@ -743,21 +846,21 @@ async def bulb_control(cmd: BulbCommand) -> dict[str, Any]:
     elif action == "color" and cmd.hue is not None and cmd.saturation is not None:
         success = bulb.set_color(cmd.hue, cmd.saturation)
     else:
-        return {"error": f"Invalid action: {cmd.action}"}
+        return CommandResponse(ok=False, error=f"Invalid action: {cmd.action}")
 
-    log.info(f"BULB: {cmd.device} {action}")
-    return {"ok": success}
+    log.info("Bulb control", device=cmd.device, action=action)
+    return CommandResponse(ok=success)
 
 
-@app.get("/api/bulb/{device_id}/state")
-async def bulb_state(device_id: str) -> dict[str, Any]:
+@app.get("/api/bulb/{device_id}/state", response_model=BulbStateResponse)
+async def bulb_state(device_id: str) -> BulbStateResponse:
     """Get bulb state."""
     bulb = get_bulb_instance(device_id)
     if not bulb:
-        return {"error": f"Unknown bulb: {device_id}"}
+        return BulbStateResponse(device=device_id, state={}, error=f"Unknown bulb: {device_id}")
 
     state = bulb.get_state()
-    return {"device": device_id, "state": state}
+    return BulbStateResponse(device=device_id, state=state)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,15 @@
 """TP-Link Tapo smart device controller using the tapo library."""
 
 import asyncio
-import logging
 import socket
+import traceback
 from typing import Any
+
+import structlog
 
 from .base import BaseDevice
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 
 class TapoBulb(BaseDevice):
@@ -29,7 +31,11 @@ class TapoBulb(BaseDevice):
         )
 
     def _run_async(self, coro):
-        """Run async code in sync context."""
+        """Run async code in sync context.
+
+        Handles the complexity of running async code from sync context,
+        whether or not an event loop is already running.
+        """
         try:
             # Try to get existing loop
             try:
@@ -45,8 +51,20 @@ class TapoBulb(BaseDevice):
                     return future.result(timeout=15)
             else:
                 return asyncio.run(coro)
+        except TimeoutError:
+            log.warning("Async operation timed out", device=self.device_id, ip=self.ip)
+            return None
+        except ConnectionError as e:
+            log.warning("Connection error", device=self.device_id, ip=self.ip, error=str(e))
+            return None
         except Exception as e:
-            log.error(f"Async error: {e}")
+            log.error(
+                "Async operation failed",
+                device=self.device_id,
+                ip=self.ip,
+                error=str(e),
+                traceback=traceback.format_exc(),
+            )
             return None
 
     async def _get_device(self):
@@ -57,8 +75,19 @@ class TapoBulb(BaseDevice):
 
                 self._client = ApiClient(self.username, self.password)
                 self._device = await self._client.l530(self.ip)
+            except ConnectionError as e:
+                log.warning(
+                    "Tapo connection failed", device=self.device_id, ip=self.ip, error=str(e)
+                )
+                self._device = None
             except Exception as e:
-                log.warning(f"Tapo connection error for {self.ip}: {e}")
+                log.error(
+                    "Tapo device init error",
+                    device=self.device_id,
+                    ip=self.ip,
+                    error=str(e),
+                    traceback=traceback.format_exc(),
+                )
                 self._device = None
         return self._device
 
@@ -97,7 +126,9 @@ class TapoBulb(BaseDevice):
                     self._state["hue"] = getattr(info, "hue", 0)
                     self._state["saturation"] = getattr(info, "saturation", 0)
                 except Exception as e:
-                    log.error(f"Tapo get_state error: {e}")
+                    log.error(
+                        "Tapo get_state error", device=self.device_id, ip=self.ip, error=str(e)
+                    )
                     self._state["online"] = False
             return self._state
 

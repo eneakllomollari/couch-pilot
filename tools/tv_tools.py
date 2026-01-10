@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import contextlib
 import time
 from pathlib import Path
 from typing import Any
@@ -134,10 +135,8 @@ async def _run_adb(
 
         except TimeoutError:
             # Kill process if it times out
-            try:
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
             return "", "Command timed out", -1
 
     # All retries exhausted

@@ -1,6 +1,7 @@
 """Smart Home Chat Agent - FastAPI Application with Claude Agent SDK."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -408,10 +409,8 @@ async def _adb(device: str, *args: str) -> tuple[str, str, int]:
         return stdout.decode(), stderr.decode(), proc.returncode or 0
 
     except TimeoutError:
-        try:
+        with contextlib.suppress(Exception):
             proc.kill()
-        except Exception:
-            pass
         return "", "Command timed out", -1
 
 

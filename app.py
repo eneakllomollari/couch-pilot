@@ -1,8 +1,9 @@
 """Smart Home Chat Agent - FastAPI Application with Claude Agent SDK."""
 
+import asyncio
+import contextlib
 import json
 import logging
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,8 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    CLINotFoundError,
+    ProcessError,
     ResultMessage,
     TextBlock,
     ToolResultBlock,
@@ -33,15 +36,27 @@ logging.basicConfig(
 )
 log = logging.getLogger("chat")
 
+# Cache system prompt at module level to avoid rebuilding on every connection
+_SYSTEM_PROMPT_CACHE: str | None = None
+
+# Connection limit to prevent resource exhaustion
+MAX_CONNECTIONS = 10
+active_connections = 0
+
 
 def build_system_prompt() -> str:
-    """Build system prompt with dynamic TV list."""
+    """Build system prompt once and cache for reuse across connections."""
+    global _SYSTEM_PROMPT_CACHE
+
+    if _SYSTEM_PROMPT_CACHE is not None:
+        return _SYSTEM_PROMPT_CACHE
+
     config = get_config()
     tv_list = "\n".join(
         f"- {dev_id}{' (default)' if i == 0 else ''}: {tv.name} at {tv.ip}:{tv.port}"
         for i, (dev_id, tv) in enumerate(config.tv_devices.items())
     )
-    return f"""You control TVs via ADB.
+    _SYSTEM_PROMPT_CACHE = f"""You control TVs via ADB.
 
 AVAILABLE TVs:
 {tv_list}
@@ -107,6 +122,8 @@ DEVICE SELECTION:
 
 DO NOT report success without calling get_tv_status first!"""
 
+    return _SYSTEM_PROMPT_CACHE
+
 
 app = FastAPI(title="Smart Home Chat Agent")
 
@@ -121,10 +138,21 @@ async def chat_page():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    global active_connections
+
+    # Check connection limit before accepting
+    if active_connections >= MAX_CONNECTIONS:
+        await websocket.close(code=1008, reason="Too many connections. Try again later.")
+        log.warning(f"Connection rejected: limit of {MAX_CONNECTIONS} reached")
+        return
+
     await websocket.accept()
+    active_connections += 1
+    log.info(f"Connection accepted ({active_connections}/{MAX_CONNECTIONS} active)")
 
     # Configure Claude Agent SDK - only TV tools + Bash
     options = ClaudeAgentOptions(
+        model="claude-sonnet-4-20250514",  # Pin model for consistent behavior
         mcp_servers={"tv-control": tv_server},
         allowed_tools=[
             # Our custom TV tools
@@ -159,7 +187,7 @@ async def websocket_endpoint(websocket: WebSocket):
             config = get_config()
             if config.tv_devices:
                 default_device_id = next(iter(config.tv_devices.keys()))
-                welcome = _get_tv_status_message(default_device_id)
+                welcome = await _get_tv_status_message(default_device_id)
             else:
                 welcome = "No TVs configured. Add TV_DEVICES to your .env file."
 
@@ -185,8 +213,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     start_time = time.time()
 
-                    # Query Claude with device context
-                    await client.query(query_text)
+                    # Query Claude with device context (with timeout to prevent hung connections)
+                    await asyncio.wait_for(client.query(query_text), timeout=120.0)
 
                     # Collect response
                     response_text = ""
@@ -295,12 +323,36 @@ async def websocket_endpoint(websocket: WebSocket):
                             }
                         )
 
-                except Exception as e:
-                    log.error(f"  ERROR: {e}")
+                except TimeoutError:
+                    log.error("  ERROR: SDK operation timed out after 2 minutes")
                     await websocket.send_json(
                         {
                             "type": "error",
-                            "content": f"Error: {str(e)}",
+                            "content": "Request timed out after 2 minutes. The operation took too long to complete. Please try again.",
+                        }
+                    )
+                except CLINotFoundError:
+                    log.error("  ERROR: Claude CLI not found")
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "content": "Claude CLI not found. Please install it with: pip install claude-code",
+                        }
+                    )
+                except ProcessError as e:
+                    log.error(f"  ERROR: SDK process error (exit code {e.exit_code}): {e.stderr}")
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "content": f"SDK process error (exit code {e.exit_code}). Check server logs for details.",
+                        }
+                    )
+                except Exception as e:
+                    log.error(f"  ERROR: Unexpected error: {e}", exc_info=True)
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "content": "An unexpected error occurred. Check server logs for details.",
                         }
                     )
 
@@ -308,6 +360,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         log.info("SESSION ENDED - Client disconnected")
+    finally:
+        active_connections -= 1
+        log.info(f"Connection closed ({active_connections}/{MAX_CONNECTIONS} active)")
 
 
 @app.get("/api/health")
@@ -318,7 +373,7 @@ async def health():
 @app.get("/api/remote/status/{device}")
 async def remote_status(device: str) -> dict[str, Any]:
     """Get TV status message for display."""
-    return {"status": _get_tv_status_message(device)}
+    return {"status": await _get_tv_status_message(device)}
 
 
 # =============================================================================
@@ -340,12 +395,23 @@ def _get_device_addr(device: str) -> str:
     return f"{tv.ip}:{tv.port}"
 
 
-def _adb(device: str, *args: str) -> tuple[str, str, int]:
-    """Run ADB command and return (stdout, stderr, returncode)."""
+async def _adb(device: str, *args: str) -> tuple[str, str, int]:
+    """Run ADB command asynchronously and return (stdout, stderr, returncode)."""
     addr = _get_device_addr(device)
     cmd = ["adb", "-s", addr, *args]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-    return result.stdout, result.stderr, result.returncode
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        return stdout.decode(), stderr.decode(), proc.returncode or 0
+
+    except TimeoutError:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        return "", "Command timed out", -1
 
 
 # Package name to friendly app name mapping
@@ -374,7 +440,7 @@ APP_NAMES = {
 }
 
 
-def _get_tv_status_message(device_id: str) -> str:
+async def _get_tv_status_message(device_id: str) -> str:
     """Get a human-readable TV status message."""
     config = get_config()
     tv = config.tv_devices.get(device_id)
@@ -388,7 +454,7 @@ def _get_tv_status_message(device_id: str) -> str:
             "dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' || true; "
             "dumpsys media_session | grep -E 'state=PlaybackState|metadata:' || true"
         )
-        stdout, _, _ = _adb(device_id, "shell", cmd)
+        stdout, _, _ = await _adb(device_id, "shell", cmd)
 
         # Check if we got any output (ADB connected)
         if not stdout.strip():
@@ -459,7 +525,7 @@ async def remote_navigate(cmd: RemoteCommand) -> dict[str, Any]:
     if not keycode:
         return {"error": f"Unknown action: {cmd.action}"}
 
-    stdout, stderr, rc = _adb(cmd.device, "shell", "input", "keyevent", keycode)
+    stdout, stderr, rc = await _adb(cmd.device, "shell", "input", "keyevent", keycode)
     log.info(f"REMOTE: {cmd.device} navigate {cmd.action}")
     return {"ok": rc == 0}
 
@@ -467,7 +533,9 @@ async def remote_navigate(cmd: RemoteCommand) -> dict[str, Any]:
 @app.post("/api/remote/play_pause")
 async def remote_play_pause(cmd: RemoteCommand) -> dict[str, Any]:
     """Toggle play/pause."""
-    stdout, stderr, rc = _adb(cmd.device, "shell", "input", "keyevent", "KEYCODE_MEDIA_PLAY_PAUSE")
+    stdout, stderr, rc = await _adb(
+        cmd.device, "shell", "input", "keyevent", "KEYCODE_MEDIA_PLAY_PAUSE"
+    )
     log.info(f"REMOTE: {cmd.device} play_pause")
     return {"ok": rc == 0}
 
@@ -475,7 +543,7 @@ async def remote_play_pause(cmd: RemoteCommand) -> dict[str, Any]:
 @app.post("/api/remote/power")
 async def remote_power(cmd: RemoteCommand) -> dict[str, Any]:
     """Toggle power."""
-    stdout, stderr, rc = _adb(cmd.device, "shell", "input", "keyevent", "KEYCODE_POWER")
+    stdout, stderr, rc = await _adb(cmd.device, "shell", "input", "keyevent", "KEYCODE_POWER")
     log.info(f"REMOTE: {cmd.device} power")
     return {"ok": rc == 0}
 
@@ -492,7 +560,7 @@ async def remote_volume(cmd: RemoteCommand) -> dict[str, Any]:
     if not keycode:
         return {"error": f"Unknown action: {cmd.action}"}
 
-    stdout, stderr, rc = _adb(cmd.device, "shell", "input", "keyevent", keycode)
+    stdout, stderr, rc = await _adb(cmd.device, "shell", "input", "keyevent", keycode)
     log.info(f"REMOTE: {cmd.device} volume {cmd.action}")
     return {"ok": rc == 0}
 
@@ -623,7 +691,7 @@ async def remote_list_apps(device: str) -> dict[str, Any]:
     }
 
     try:
-        stdout, stderr, rc = _adb(device, "shell", "pm", "list", "packages")
+        stdout, stderr, rc = await _adb(device, "shell", "pm", "list", "packages")
     except ValueError:
         # Device not configured
         return {"apps": [], "configured": False}
@@ -657,7 +725,7 @@ async def remote_launch_app(cmd: RemoteCommand) -> dict[str, Any]:
     if not cmd.action:
         return {"error": "App name required"}
 
-    stdout, stderr, rc = _adb(
+    stdout, stderr, rc = await _adb(
         cmd.device,
         "shell",
         "monkey",

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/eneakllomollari/couch-pilot/actions/workflows/ci.yml/badge.svg)](https://github.com/eneakllomollari/couch-pilot/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.14+](https://img.shields.io/badge/python-3.14+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 
 AI-powered TV control via natural language chat. Control your Fire TV and Google TV devices by simply telling them what to do.
 
@@ -18,7 +18,7 @@ AI-powered TV control via natural language chat. Control your Fire TV and Google
 
 ## Prerequisites
 
-- Python 3.14+
+- Python 3.12+
 - [uv](https://docs.astral.sh/uv/) package manager
 - ADB (Android Debug Bridge)
 - Anthropic API key (for Claude)

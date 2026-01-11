@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from config import get_config
+from devices.discovery import get_discovery, shutdown_discovery
 from devices.tapo import TapoBulb
 from tools.tv_tools import tv_server
 
@@ -125,7 +127,15 @@ DO NOT report success without calling get_tv_status first!"""
     return _SYSTEM_PROMPT_CACHE
 
 
-app = FastAPI(title="Smart Home Chat Agent")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle - start/stop discovery."""
+    await get_discovery()
+    yield
+    await shutdown_discovery()
+
+
+app = FastAPI(title="Smart Home Chat Agent", lifespan=lifespan)
 
 static_path = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_path), name="static")
@@ -370,6 +380,64 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/api/devices")
+async def list_devices():
+    """List all TV devices (discovered + static config)."""
+    devices = []
+    config = get_config()
+    discovery = await get_discovery()
+
+    static_ips = set()
+    for dev_id, tv in config.tv_devices.items():
+        static_ips.add(tv.ip)
+        online = await _check_device_online(tv.ip, tv.port)
+        devices.append(
+            {
+                "id": dev_id,
+                "name": tv.name,
+                "ip": tv.ip,
+                "port": tv.port,
+                "source": "config",
+                "online": online,
+            }
+        )
+
+    for dev_id, tv in discovery.get_devices().items():
+        if tv.ip not in static_ips:
+            devices.append(
+                {
+                    "id": dev_id,
+                    "name": tv.name,
+                    "ip": tv.ip,
+                    "port": tv.port,
+                    "source": "discovered",
+                    "online": tv.online,
+                    "model": tv.model,
+                }
+            )
+
+    return {"devices": devices}
+
+
+@app.post("/api/devices/scan")
+async def trigger_scan():
+    """Manually trigger a network scan."""
+    discovery = await get_discovery()
+    found = await discovery.scan_subnet()
+    return {"found": len(found), "devices": [d.id for d in found]}
+
+
+async def _check_device_online(ip: str, port: int) -> bool:
+    """Quick check if device responds."""
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=1.0)
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except Exception:
+        return False
+
+
 @app.get("/api/remote/status/{device}")
 async def remote_status(device: str) -> dict[str, Any]:
     """Get TV status message for display."""
@@ -386,8 +454,23 @@ class RemoteCommand(BaseModel):
     action: str | None = None
 
 
+async def _get_device_addr_async(device: str) -> str:
+    """Get device address, checking both config and discovered devices."""
+    config = get_config()
+    tv = config.tv_devices.get(device)
+    if tv:
+        return f"{tv.ip}:{tv.port}"
+
+    discovery = await get_discovery()
+    discovered = discovery.get_devices().get(device)
+    if discovered:
+        return f"{discovered.ip}:{discovered.port}"
+
+    raise ValueError(f"Unknown device: {device}")
+
+
 def _get_device_addr(device: str) -> str:
-    """Get device address from device ID."""
+    """Get device address from config (sync)."""
     config = get_config()
     tv = config.tv_devices.get(device)
     if not tv:
@@ -397,7 +480,7 @@ def _get_device_addr(device: str) -> str:
 
 async def _adb(device: str, *args: str) -> tuple[str, str, int]:
     """Run ADB command asynchronously and return (stdout, stderr, returncode)."""
-    addr = _get_device_addr(device)
+    addr = await _get_device_addr_async(device)
     cmd = ["adb", "-s", addr, *args]
 
     try:
@@ -444,8 +527,16 @@ async def _get_tv_status_message(device_id: str) -> str:
     """Get a human-readable TV status message."""
     config = get_config()
     tv = config.tv_devices.get(device_id)
+    tv_name = tv.name if tv else None
+
+    # If not in config, check discovered devices
     if not tv:
-        return "No TV configured."
+        discovery = await get_discovery()
+        discovered = discovery.get_devices().get(device_id)
+        if discovered:
+            tv_name = discovered.name
+        else:
+            return "No TV configured."
 
     try:
         # Get power state, current app, and media info
@@ -458,7 +549,7 @@ async def _get_tv_status_message(device_id: str) -> str:
 
         # Check if we got any output (ADB connected)
         if not stdout.strip():
-            return f"{tv.name} is offline."
+            return f"{tv_name} is offline."
 
         screen_on = False
         current_app = None
@@ -491,22 +582,22 @@ async def _get_tv_status_message(device_id: str) -> str:
                     pass
 
         if not screen_on:
-            return f"{tv.name} is off."
+            return f"{tv_name} is off."
 
         # Build status message
         if playback_state == "playing" and media_title:
-            return f"{tv.name}: Playing {media_title}"
+            return f"{tv_name}: Playing {media_title}"
         elif playback_state == "paused" and media_title:
-            return f"{tv.name}: {media_title} (paused)"
+            return f"{tv_name}: {media_title} (paused)"
         elif playback_state == "playing" and current_app:
-            return f"{tv.name}: Playing on {current_app}"
+            return f"{tv_name}: Playing on {current_app}"
         elif current_app and current_app != "Home":
-            return f"{tv.name}: {current_app}"
+            return f"{tv_name}: {current_app}"
         else:
-            return f"{tv.name} is on."
+            return f"{tv_name} is on."
 
     except Exception:
-        return f"{tv.name} selected."
+        return f"{tv_name} selected."
 
 
 @app.post("/api/remote/navigate")

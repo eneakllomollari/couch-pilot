@@ -10,18 +10,88 @@ class RemoteChatApp {
         this.statusDot = document.getElementById('status-dot');
         this.typingEl = document.getElementById('typing');
         this.statusMessage = null;
-        this.selectedDevice = 'fire_tv';
+        this.selectedDevice = null;
+        this.devices = [];
         this.isProcessing = false;
+        this.prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
         this.init();
     }
 
     init() {
+        this.loadDevices();  // Load devices first
         this.connect();
         this.chatForm.addEventListener('submit', (e) => this.handleSubmit(e));
         this.setupRemoteButtons();
-        this.setupTVSelector();
         this.setupKeyboardShortcuts();
+
+        // Listen for reduced motion preference changes
+        window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', (e) => {
+            this.prefersReducedMotion = e.matches;
+        });
+    }
+
+    async loadDevices() {
+        try {
+            const response = await fetch('/api/devices');
+            const data = await response.json();
+            this.devices = data.devices || [];
+            this.renderDeviceSelector();
+
+            // Select first online device
+            const firstOnline = this.devices.find(d => d.online);
+            if (firstOnline) {
+                this.selectedDevice = firstOnline.id;
+                this.loadApps();
+                this.loadTVStatus();
+            }
+        } catch (err) {
+            console.error('Failed to load devices:', err);
+            this.renderDeviceSelector();
+        }
+    }
+
+    renderDeviceSelector() {
+        const container = document.getElementById('device-selector');
+        if (!container) return;
+
+        if (!this.devices.length) {
+            container.innerHTML = `
+                <div class="flex-1 text-xs text-zinc-500 py-2.5 px-3">No TVs found</div>
+                <button id="scan-btn" class="text-xs text-zinc-400 hover:text-zinc-200 px-3 py-2" title="Scan for TVs">↻</button>
+            `;
+            document.getElementById('scan-btn')?.addEventListener('click', () => this.scanDevices());
+            return;
+        }
+
+        container.innerHTML = this.devices.map((dev, i) => `
+            <button class="tv-btn flex-1 py-2.5 px-3 rounded-lg text-xs font-semibold transition-colors duration-150 
+                          ${i === 0 ? 'text-zinc-50 bg-blue-500' : 'text-zinc-400 bg-transparent hover:text-zinc-50'}
+                          ${!dev.online ? 'opacity-50' : ''}
+                          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    data-device="${dev.id}" 
+                    role="tab" 
+                    aria-selected="${i === 0}"
+                    ${!dev.online ? 'disabled' : ''}>
+                ${dev.name}
+            </button>
+        `).join('');
+
+        this.setupTVSelector();
+    }
+
+    async scanDevices() {
+        const btn = document.getElementById('scan-btn');
+        if (btn) btn.textContent = '...';
+
+        try {
+            await fetch('/api/devices/scan', { method: 'POST' });
+            await this.loadDevices();
+        } catch (err) {
+            console.error('Scan failed:', err);
+        }
+
+        if (btn) btn.textContent = '↻';
     }
 
     setupKeyboardShortcuts() {
@@ -47,11 +117,11 @@ class RemoteChatApp {
                 e.preventDefault();
                 this.sendRemoteCommand(action);
 
-                // Visual feedback on corresponding button
+                // Visual feedback on corresponding button (only if motion allowed)
                 const btn = document.querySelector(`[data-action="${action}"]`);
-                if (btn) {
-                    btn.style.transform = 'scale(0.9)';
-                    setTimeout(() => btn.style.transform = '', 100);
+                if (btn && !this.prefersReducedMotion) {
+                    btn.classList.add('scale-95');
+                    setTimeout(() => btn.classList.remove('scale-95'), 100);
                 }
             }
         });
@@ -88,15 +158,23 @@ class RemoteChatApp {
     setupTVSelector() {
         document.querySelectorAll('.tv-btn').forEach(btn => {
             btn.addEventListener('click', () => {
-                document.querySelectorAll('.tv-btn').forEach(b => b.classList.remove('active'));
+                if (btn.disabled) return;
+
+                document.querySelectorAll('.tv-btn').forEach(b => {
+                    b.classList.remove('active');
+                    b.classList.add('text-zinc-400', 'bg-transparent');
+                    b.classList.remove('text-zinc-50', 'bg-blue-500');
+                    b.setAttribute('aria-selected', 'false');
+                });
                 btn.classList.add('active');
+                btn.classList.remove('text-zinc-400', 'bg-transparent');
+                btn.classList.add('text-zinc-50', 'bg-blue-500');
+                btn.setAttribute('aria-selected', 'true');
                 this.selectedDevice = btn.dataset.device;
                 this.loadApps();
                 this.loadTVStatus();
             });
         });
-        // Load apps for default device
-        this.loadApps();
     }
 
     async loadTVStatus() {
@@ -118,21 +196,21 @@ class RemoteChatApp {
 
     async loadApps() {
         const grid = document.getElementById('apps-grid');
-        grid.innerHTML = '<div class="apps-loading">Loading...</div>';
+        grid.innerHTML = '<div class="col-span-full text-center text-xs text-zinc-500 py-3">Loading...</div>';
 
         try {
             const response = await fetch(`/api/remote/apps/${this.selectedDevice}`);
             const data = await response.json();
 
             if (data.configured === false) {
-                grid.innerHTML = '<div class="apps-empty">Configure TV in .env</div>';
+                grid.innerHTML = '<div class="col-span-full text-center text-xs text-zinc-500 py-3">Configure TV in .env</div>';
             } else if (data.apps && data.apps.length > 0) {
                 grid.innerHTML = data.apps.map(app => {
                     const icon = app.logo
                         ? `<img class="app-logo" src="${app.logo}" alt="${app.name}">`
                         : `<span class="app-icon" style="background:${app.color}">${app.name[0]}</span>`;
                     return `
-                        <button class="app-btn" data-package="${app.package}" title="${app.name}">
+                        <button class="app-btn" data-package="${app.package}" title="${app.name}" aria-label="Open ${app.name}">
                             ${icon}
                             <span class="app-name">${app.name}</span>
                         </button>
@@ -144,11 +222,11 @@ class RemoteChatApp {
                     btn.addEventListener('click', () => this.launchApp(btn.dataset.package));
                 });
             } else {
-                grid.innerHTML = '<div class="apps-empty">No apps found</div>';
+                grid.innerHTML = '<div class="col-span-full text-center text-xs text-zinc-500 py-3">No apps found</div>';
             }
         } catch (err) {
             console.error('Failed to load apps:', err);
-            grid.innerHTML = '<div class="apps-empty">Error loading</div>';
+            grid.innerHTML = '<div class="col-span-full text-center text-xs text-zinc-500 py-3">Error loading</div>';
         }
     }
 
@@ -171,9 +249,9 @@ class RemoteChatApp {
                 const action = btn.dataset.action;
                 this.sendRemoteCommand(action);
 
-                // Visual feedback
-                btn.style.transform = 'scale(0.9)';
-                setTimeout(() => btn.style.transform = '', 100);
+                // Visual feedback via CSS class (respects prefers-reduced-motion via CSS)
+                btn.classList.add('scale-95');
+                setTimeout(() => btn.classList.remove('scale-95'), 100);
             });
         });
     }
@@ -229,7 +307,13 @@ class RemoteChatApp {
                 break;
 
             case 'typing':
-                this.typingEl.style.display = data.content ? 'flex' : 'none';
+                if (data.content) {
+                    this.typingEl.classList.remove('hidden');
+                    this.typingEl.classList.add('flex');
+                } else {
+                    this.typingEl.classList.add('hidden');
+                    this.typingEl.classList.remove('flex');
+                }
                 break;
 
             case 'error':
@@ -275,7 +359,7 @@ class RemoteChatApp {
     setProcessing(processing) {
         this.isProcessing = processing;
         this.messageInput.disabled = processing;
-        document.querySelector('.chat-form button').disabled = processing;
+        document.querySelector('.chat-form button, #chat-form button').disabled = processing;
         if (processing) {
             this.messageInput.placeholder = 'Working...';
         } else {
@@ -289,7 +373,7 @@ class RemoteChatApp {
         messageDiv.className = `message ${type}`;
 
         const contentDiv = document.createElement('div');
-        contentDiv.className = 'message-content';
+        contentDiv.className = 'message-content text-pretty';
         contentDiv.textContent = content;
 
         // Only show avatar for user messages

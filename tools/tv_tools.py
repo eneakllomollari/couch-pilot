@@ -13,13 +13,26 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 from config import get_config
 
 
-def _get_tv_devices() -> dict[str, dict[str, Any]]:
-    """Get TV devices from configuration."""
+async def _get_tv_devices() -> dict[str, dict[str, Any]]:
+    """Get TV devices from config and discovery."""
+    from devices.discovery import get_discovery
+
+    devices = {}
     config = get_config()
-    return {
-        device_id: {"ip": tv.ip, "port": tv.port, "name": tv.name}
-        for device_id, tv in config.tv_devices.items()
-    }
+
+    for device_id, tv in config.tv_devices.items():
+        devices[device_id] = {"ip": tv.ip, "port": tv.port, "name": tv.name}
+
+    try:
+        discovery = await get_discovery()
+        static_ips = {d["ip"] for d in devices.values()}
+        for dev_id, tv in discovery.get_devices().items():
+            if tv.ip not in static_ips and tv.online:
+                devices[dev_id] = {"ip": tv.ip, "port": tv.port, "name": tv.name}
+    except Exception:
+        pass
+
+    return devices
 
 
 # Cache for discovered packages per device
@@ -32,7 +45,7 @@ _status_cache_duration = 2.0  # seconds
 
 async def _get_package(device: str, app: str) -> str | None:
     """Get package name for an app on a device by querying it."""
-    tv_devices = _get_tv_devices()
+    tv_devices = await _get_tv_devices()
     addr = f"{tv_devices[device]['ip']}:{tv_devices[device]['port']}"
 
     # Check cache first
@@ -87,9 +100,9 @@ async def _get_package(device: str, app: str) -> str | None:
     return None
 
 
-def _get_device_address(device: str) -> str:
+async def _get_device_address(device: str) -> str:
     """Get device IP:port string."""
-    tv_devices = _get_tv_devices()
+    tv_devices = await _get_tv_devices()
     if device not in tv_devices:
         raise ValueError(f"Unknown device: {device}. Available: {list(tv_devices.keys())}")
     d = tv_devices[device]
@@ -110,7 +123,7 @@ async def _run_adb(
     Returns:
         Tuple of (stdout, stderr, returncode)
     """
-    addr = _get_device_address(device)
+    addr = await _get_device_address(device)
     cmd = ["adb", "-s", addr] + list(args)
 
     last_error = None
@@ -306,7 +319,7 @@ async def play(args: dict[str, Any]) -> dict[str, Any]:
     """Open a URL on the TV and return status."""
     device = args["device"]
     url = _normalize_url(args["url"])  # Auto-convert to deep link
-    addr = _get_device_address(device)
+    addr = await _get_device_address(device)
 
     is_netflix = "netflix" in url
     is_hbomax = "play.max.com" in url or "hbomax" in url
@@ -664,7 +677,8 @@ async def navigate(args: dict[str, Any]) -> dict[str, Any]:
     focus_changed = before_stdout.strip() != after_stdout.strip()
 
     # Return concise message
-    device_name = _get_tv_devices()[device]["name"]
+    tv_devices = await _get_tv_devices()
+    device_name = tv_devices[device]["name"]
     msg = f"{action.title()} on {device_name}"
     if status:
         msg += f" - {status}"
@@ -708,12 +722,15 @@ async def play_pause(args: dict[str, Any]) -> dict[str, Any]:
     before_name = state_names.get(before_state, f"unknown({before_state})")
     after_name = state_names.get(after_state, f"unknown({after_state})")
 
+    tv_devices = await _get_tv_devices()
+    device_name = tv_devices[device]["name"]
+
     if before_state != after_state:
         return {
             "content": [
                 {
                     "type": "text",
-                    "text": f"Play/pause toggled on {_get_tv_devices()[device]['name']}: {before_name} → {after_name} (verified)",
+                    "text": f"Play/pause toggled on {device_name}: {before_name} → {after_name} (verified)",
                 }
             ]
         }
@@ -722,7 +739,7 @@ async def play_pause(args: dict[str, Any]) -> dict[str, Any]:
             "content": [
                 {
                     "type": "text",
-                    "text": f"Play/pause sent to {_get_tv_devices()[device]['name']} but no active media session detected. Command may have had no effect.",
+                    "text": f"Play/pause sent to {device_name} but no active media session detected. Command may have had no effect.",
                 }
             ],
             "is_error": True,
@@ -732,7 +749,7 @@ async def play_pause(args: dict[str, Any]) -> dict[str, Any]:
             "content": [
                 {
                     "type": "text",
-                    "text": f"Play/pause sent to {_get_tv_devices()[device]['name']} but state did not change (still {after_name}). App may not have responded.",
+                    "text": f"Play/pause sent to {device_name} but state did not change (still {after_name}). App may not have responded.",
                 }
             ],
             "is_error": True,
@@ -743,6 +760,8 @@ async def play_pause(args: dict[str, Any]) -> dict[str, Any]:
 async def turn_on(args: dict[str, Any]) -> dict[str, Any]:
     """Turn on/wake the TV and verify it actually woke up."""
     device = args["device"]
+    tv_devices = await _get_tv_devices()
+    device_name = tv_devices[device]["name"]
 
     # Get initial state
     initial_stdout, _, _ = await _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
@@ -767,7 +786,7 @@ async def turn_on(args: dict[str, Any]) -> dict[str, Any]:
                     "content": [
                         {
                             "type": "text",
-                            "text": f"{_get_tv_devices()[device]['name']} was already on (verified: screen is awake)",
+                            "text": f"{device_name} was already on (verified: screen is awake)",
                         }
                     ]
                 }
@@ -775,7 +794,7 @@ async def turn_on(args: dict[str, Any]) -> dict[str, Any]:
                 "content": [
                     {
                         "type": "text",
-                        "text": f"{_get_tv_devices()[device]['name']} turned on successfully (verified: screen is now awake)",
+                        "text": f"{device_name} turned on successfully (verified: screen is now awake)",
                     }
                 ]
             }
@@ -796,6 +815,8 @@ async def turn_on(args: dict[str, Any]) -> dict[str, Any]:
 async def turn_off(args: dict[str, Any]) -> dict[str, Any]:
     """Turn off/sleep the TV and verify it actually went to sleep."""
     device = args["device"]
+    tv_devices = await _get_tv_devices()
+    device_name = tv_devices[device]["name"]
 
     # Get initial state
     initial_stdout, _, _ = await _run_adb(device, "shell", "dumpsys power | grep mWakefulness")
@@ -820,7 +841,7 @@ async def turn_off(args: dict[str, Any]) -> dict[str, Any]:
                     "content": [
                         {
                             "type": "text",
-                            "text": f"{_get_tv_devices()[device]['name']} was already off (verified: screen is asleep)",
+                            "text": f"{device_name} was already off (verified: screen is asleep)",
                         }
                     ]
                 }
@@ -828,7 +849,7 @@ async def turn_off(args: dict[str, Any]) -> dict[str, Any]:
                 "content": [
                     {
                         "type": "text",
-                        "text": f"{_get_tv_devices()[device]['name']} turned off successfully (verified: screen is now asleep)",
+                        "text": f"{device_name} turned off successfully (verified: screen is now asleep)",
                     }
                 ]
             }
@@ -910,9 +931,10 @@ async def volume(args: dict[str, Any]) -> dict[str, Any]:
     after_vol, after_muted = await _get_volume(device)
 
     # Build result with verification
+    tv_devices = await _get_tv_devices()
     result = {
         "action": action,
-        "device": _get_tv_devices()[device]["name"],
+        "device": tv_devices[device]["name"],
         "verified": False,
     }
 
@@ -953,7 +975,7 @@ async def volume(args: dict[str, Any]) -> dict[str, Any]:
 async def screenshot(args: dict[str, Any]) -> dict[str, Any]:
     """Take screenshot and return as base64 image."""
     device = args["device"]
-    addr = _get_device_address(device)
+    addr = await _get_device_address(device)
 
     # Take screenshot and save locally
     tmp_path = Path(f"/tmp/tv_screenshot_{device}.png")
@@ -982,10 +1004,11 @@ async def screenshot(args: dict[str, Any]) -> dict[str, Any]:
         tmp_path.write_bytes(result_stdout)
 
         # Return as base64 image
+        tv_devices = await _get_tv_devices()
         img_base64 = base64.b64encode(result_stdout).decode("utf-8")
         return {
             "content": [
-                {"type": "text", "text": f"Screenshot from {_get_tv_devices()[device]['name']}:"},
+                {"type": "text", "text": f"Screenshot from {tv_devices[device]['name']}:"},
                 {
                     "type": "image",
                     "source": {"type": "base64", "media_type": "image/png", "data": img_base64},
@@ -1063,6 +1086,7 @@ async def type_text(args: dict[str, Any]) -> dict[str, Any]:
 async def get_tv_status(args: dict[str, Any]) -> dict[str, Any]:
     """Get comprehensive TV status - single fast ADB call."""
     device = args["device"]
+    tv_devices = await _get_tv_devices()
 
     # Single combined command for speed
     cmd = (
@@ -1073,7 +1097,7 @@ async def get_tv_status(args: dict[str, Any]) -> dict[str, Any]:
     stdout, stderr, code = await _run_adb(device, "shell", cmd)
 
     status = {
-        "device": _get_tv_devices()[device]["name"],
+        "device": tv_devices[device]["name"],
         "screen": "unknown",
         "current_app": None,
         "playback": None,
@@ -1132,7 +1156,7 @@ async def get_tv_status(args: dict[str, Any]) -> dict[str, Any]:
 async def list_apps(args: dict[str, Any]) -> dict[str, Any]:
     """List installed streaming apps on a device."""
     device = args["device"]
-    addr = _get_device_address(device)
+    addr = await _get_device_address(device)
 
     # Get all packages
     try:
@@ -1192,13 +1216,16 @@ async def list_apps(args: dict[str, Any]) -> dict[str, Any]:
                 found_apps.append(pkg)
                 break
 
+    tv_devices = await _get_tv_devices()
+    device_name = tv_devices[device]["name"]
+
     if found_apps:
         apps_list = "\n".join(f"- {app}" for app in sorted(found_apps))
         return {
             "content": [
                 {
                     "type": "text",
-                    "text": f"Streaming apps on {_get_tv_devices()[device]['name']}:\n{apps_list}",
+                    "text": f"Streaming apps on {device_name}:\n{apps_list}",
                 }
             ]
         }
@@ -1207,7 +1234,7 @@ async def list_apps(args: dict[str, Any]) -> dict[str, Any]:
             "content": [
                 {
                     "type": "text",
-                    "text": f"No streaming apps found on {_get_tv_devices()[device]['name']}",
+                    "text": f"No streaming apps found on {device_name}",
                 }
             ]
         }
@@ -1217,8 +1244,9 @@ async def list_apps(args: dict[str, Any]) -> dict[str, Any]:
 async def list_tvs(args: dict[str, Any]) -> dict[str, Any]:
     """List available TVs with status."""
     results = []
+    tv_devices = await _get_tv_devices()
 
-    for device_id, config in _get_tv_devices().items():
+    for device_id, config in tv_devices.items():
         addr = f"{config['ip']}:{config['port']}"
 
         # Check if connected
